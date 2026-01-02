@@ -152,12 +152,12 @@ Learn more about how tracing works and how to integrate it in the [Tracing Guide
 | Format                      | Status     | Compatibility       | Modalities      |
 | --------------------------- | ---------- | ------------------- | --------------- |
 | **OpenAI Chat Completions** | ✅ Done    | Fully compatible    | Text, Image     |
-| **OpenAI Responses**        | ⚠️ Partial | No `previous_response_id` | Text        |
+| **OpenAI Responses**        | ✅ Done    | Fully supported with `previous_response_id` | Text        |
 | **Anthropic Messages**      | ✅ Done    | Fully supported     | Text            |
 | **Gemini**                  | ✅ Done    | Fully supported     | Text, Image     |
 | **AI SDK**                  | ⚠️ Partial | Partially supported | Text            |
 
-**Key Feature**: Use OpenAI API to call Anthropic models, or Anthropic API to call OpenAI models - AxonHub handles automatic API translation!
+**Key Feature**: Use OpenAI API to call Anthropic models, Anthropic API to call OpenAI models, or **Responses API to call Chat Completions providers** - AxonHub handles automatic API translation! See [this guide](docs/guides/responses-with-chat-completions.md) for details.
 
 ---
 
@@ -329,11 +329,12 @@ axonhub config check
 
 ### Unified API Overview
 
-AxonHub provides a unified API gateway that supports both OpenAI Chat Completions and Anthropic Messages APIs. This means you can:
+AxonHub provides a unified API gateway that supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages APIs. This means you can:
 
 - **Use OpenAI API to call Anthropic models** - Keep using your OpenAI SDK while accessing Claude models
 - **Use Anthropic API to call OpenAI models** - Use Anthropic's native API format with GPT models
 - **Use Gemini API to call OpenAI models** - Use Gemini's native API format with GPT models
+- **Use Responses API to call Chat Completions providers** - Use the modern Responses API with any OpenAI-compatible provider ([learn more](docs/guides/responses-with-chat-completions.md))
 - **Automatic API translation** - AxonHub handles format conversion automatically
 - **Zero code changes** - Your existing OpenAI or Anthropic client code continues to work
 
