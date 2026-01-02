@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -10,11 +9,6 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
-
-func TestMain(m *testing.M) {
-	code := m.Run()
-	os.Exit(code)
-}
 
 // TestResponsesWithChatCompletionsBackend verifies that /v1/responses API
 // can successfully call providers that only support /v1/chat/completions.
