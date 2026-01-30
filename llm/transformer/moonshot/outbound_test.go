@@ -204,6 +204,52 @@ func TestOutboundTransformer_TransformRequest_Basic(t *testing.T) {
 	assert.Len(t, oaiReq.Messages, 1)
 }
 
+func TestOutboundTransformer_TransformRequest_MissingReasoningContent(t *testing.T) {
+	config := &Config{
+		BaseURL: "https://api.moonshot.cn/v1",
+		APIKey:  "test-api-key",
+	}
+
+	transformer, err := NewOutboundTransformerWithConfig(config)
+	require.NoError(t, err)
+
+	request := &llm.Request{
+		Model: "moonshot-v1-8k",
+		Messages: []llm.Message{
+			{
+				Role: "assistant",
+				Content: llm.MessageContent{
+					Content: lo.ToPtr("Calling a tool"),
+				},
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:   "tool_1",
+						Type: "function",
+						Function: llm.FunctionCall{
+							Name:      "test_tool",
+							Arguments: "{}",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	got, err := transformer.TransformRequest(ctx, request)
+
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+
+	var oaiReq openai.Request
+
+	err = json.Unmarshal(got.Body, &oaiReq)
+	require.NoError(t, err)
+	require.Len(t, oaiReq.Messages, 1)
+	require.NotNil(t, oaiReq.Messages[0].ReasoningContent)
+	assert.Equal(t, " ", *oaiReq.Messages[0].ReasoningContent)
+}
+
 func TestOutboundTransformer_TransformRequest_Errors(t *testing.T) {
 	config := &Config{
 		BaseURL: "https://api.moonshot.cn/v1",
