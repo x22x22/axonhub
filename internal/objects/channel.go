@@ -73,6 +73,9 @@ type TransformOptions struct {
 
 	// ReplaceDeveloperRoleWithSystem replaces developer role with system in messages for Bailian compatibility.
 	ReplaceDeveloperRoleWithSystem bool `json:"replaceDeveloperRoleWithSystem"`
+
+	// MergeDeveloperRoleIntoSystem merges developer messages into a single system message for Bailian compatibility.
+	MergeDeveloperRoleIntoSystem bool `json:"mergeDeveloperRoleIntoSystem"`
 }
 
 type ChannelSettings struct {

@@ -96,6 +96,7 @@ const CREATE_CHANNEL_MUTATION = `
             forceArrayInstructions
             forceArrayInputs
             replaceDeveloperRoleWithSystem
+            mergeDeveloperRoleIntoSystem
           }
         }
       orderingWeight
@@ -141,6 +142,7 @@ const BULK_CREATE_CHANNELS_MUTATION = `
             forceArrayInstructions
             forceArrayInputs
             replaceDeveloperRoleWithSystem
+            mergeDeveloperRoleIntoSystem
           }
         }
       orderingWeight
@@ -186,6 +188,7 @@ const UPDATE_CHANNEL_MUTATION = `
             forceArrayInstructions
             forceArrayInputs
             replaceDeveloperRoleWithSystem
+            mergeDeveloperRoleIntoSystem
           }
         }
       orderingWeight
@@ -278,6 +281,7 @@ const BULK_IMPORT_CHANNELS_MUTATION = `
             forceArrayInstructions
             forceArrayInputs
             replaceDeveloperRoleWithSystem
+            mergeDeveloperRoleIntoSystem
           }
         }
       }
@@ -443,6 +447,7 @@ const BULK_UPDATE_CHANNEL_ORDERING_MUTATION = `
             forceArrayInstructions
             forceArrayInputs
             replaceDeveloperRoleWithSystem
+            mergeDeveloperRoleIntoSystem
           }
         }
       }
@@ -574,6 +579,7 @@ const QUERY_CHANNELS_QUERY = `
               forceArrayInstructions
               forceArrayInputs
               replaceDeveloperRoleWithSystem
+              mergeDeveloperRoleIntoSystem
             }
           }
           orderingWeight

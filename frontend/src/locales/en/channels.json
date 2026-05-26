@@ -345,6 +345,8 @@
   "channels.dialogs.fields.transformOptions.forceArrayInputs.description": "Force the channel to accept array format for inputs",
   "channels.dialogs.fields.transformOptions.replaceDeveloperRoleWithSystem.label": "Replace developer role with system",
   "channels.dialogs.fields.transformOptions.replaceDeveloperRoleWithSystem.description": "Replace developer role with system before sending requests (Bailian only)",
+  "channels.dialogs.fields.transformOptions.mergeDeveloperRoleIntoSystem.label": "Merge developer into system",
+  "channels.dialogs.fields.transformOptions.mergeDeveloperRoleIntoSystem.description": "Append developer messages to the system message and remove developer messages before sending requests (Bailian only, mutually exclusive with replace mode)",
   "channels.dialogs.fields.gcpRegion.label": "GCP Region",
   "channels.dialogs.fields.gcpRegion.placeholder": "us-central1",
   "channels.dialogs.fields.gcpProjectID.label": "GCP Project ID",

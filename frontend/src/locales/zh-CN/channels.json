@@ -348,6 +348,8 @@
   "channels.dialogs.fields.transformOptions.forceArrayInputs.description": "强制渠道接受数组格式的输入",
   "channels.dialogs.fields.transformOptions.replaceDeveloperRoleWithSystem.label": "将 developer 角色替换为 system",
   "channels.dialogs.fields.transformOptions.replaceDeveloperRoleWithSystem.description": "发送请求前把 developer 角色替换为 system（仅百炼）",
+  "channels.dialogs.fields.transformOptions.mergeDeveloperRoleIntoSystem.label": "将 developer 合并到 system",
+  "channels.dialogs.fields.transformOptions.mergeDeveloperRoleIntoSystem.description": "发送请求前把 developer 消息拼接到 system 消息后面，并移除 developer 消息（仅百炼，和替换模式二选一）",
   "channels.dialogs.fields.gcpRegion.label": "GCP 区域",
   "channels.dialogs.fields.gcpRegion.placeholder": "us-central1",
   "channels.dialogs.fields.gcpProjectID.label": "GCP 项目 ID",

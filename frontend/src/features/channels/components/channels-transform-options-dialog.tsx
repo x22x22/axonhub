@@ -25,6 +25,7 @@ const transformOptionsFormSchema = z.object({
   forceArrayInstructions: z.boolean().optional(),
   forceArrayInputs: z.boolean().optional(),
   replaceDeveloperRoleWithSystem: z.boolean().optional(),
+  mergeDeveloperRoleIntoSystem: z.boolean().optional(),
 });
 
 export function ChannelsTransformOptionsDialog({ open, onOpenChange, currentRow }: Props) {
@@ -37,6 +38,7 @@ export function ChannelsTransformOptionsDialog({ open, onOpenChange, currentRow 
       forceArrayInstructions: currentRow.settings?.transformOptions?.forceArrayInstructions || false,
       forceArrayInputs: currentRow.settings?.transformOptions?.forceArrayInputs || false,
       replaceDeveloperRoleWithSystem: currentRow.settings?.transformOptions?.replaceDeveloperRoleWithSystem || false,
+      mergeDeveloperRoleIntoSystem: currentRow.settings?.transformOptions?.mergeDeveloperRoleIntoSystem || false,
     },
   });
 
@@ -46,6 +48,7 @@ export function ChannelsTransformOptionsDialog({ open, onOpenChange, currentRow 
         forceArrayInstructions: currentRow.settings?.transformOptions?.forceArrayInstructions || false,
         forceArrayInputs: currentRow.settings?.transformOptions?.forceArrayInputs || false,
         replaceDeveloperRoleWithSystem: currentRow.settings?.transformOptions?.replaceDeveloperRoleWithSystem || false,
+        mergeDeveloperRoleIntoSystem: currentRow.settings?.transformOptions?.mergeDeveloperRoleIntoSystem || false,
       });
     }
   }, [open, currentRow, form]);
@@ -53,7 +56,10 @@ export function ChannelsTransformOptionsDialog({ open, onOpenChange, currentRow 
   const onSubmit = async (values: TransformOptions) => {
     try {
       const nextSettings = mergeChannelSettingsForUpdate(currentRow.settings, {
-        transformOptions: values,
+        transformOptions: {
+          ...values,
+          mergeDeveloperRoleIntoSystem: values.replaceDeveloperRoleWithSystem ? false : values.mergeDeveloperRoleIntoSystem,
+        },
       });
 
       await updateChannel.mutateAsync({
@@ -100,7 +106,15 @@ export function ChannelsTransformOptionsDialog({ open, onOpenChange, currentRow 
                     render={({ field }) => (
                       <FormItem className='flex items-center gap-2'>
                         <FormControl>
-                          <Checkbox checked={field.value || false} onCheckedChange={field.onChange} />
+                          <Checkbox
+                            checked={field.value || false}
+                            onCheckedChange={(checked) => {
+                              field.onChange(checked === true);
+                              if (checked === true) {
+                                form.setValue('mergeDeveloperRoleIntoSystem', false);
+                              }
+                            }}
+                          />
                         </FormControl>
                         <div className='space-y-0.5'>
                           <FormLabel className='cursor-pointer text-sm font-normal'>
@@ -150,6 +164,35 @@ export function ChannelsTransformOptionsDialog({ open, onOpenChange, currentRow 
                           </FormLabel>
                           <p className='text-muted-foreground text-xs'>
                             {t('channels.dialogs.fields.transformOptions.replaceDeveloperRoleWithSystem.description')}
+                          </p>
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name='mergeDeveloperRoleIntoSystem'
+                    render={({ field }) => (
+                      <FormItem className='flex items-center gap-2'>
+                        <FormControl>
+                          <Checkbox
+                            checked={field.value || false}
+                            onCheckedChange={(checked) => {
+                              field.onChange(checked === true);
+                              if (checked === true) {
+                                form.setValue('replaceDeveloperRoleWithSystem', false);
+                              }
+                            }}
+                          />
+                        </FormControl>
+                        <div className='space-y-0.5'>
+                          <FormLabel className='cursor-pointer text-sm font-normal'>
+                            {t('channels.dialogs.fields.transformOptions.mergeDeveloperRoleIntoSystem.label')}
+                          </FormLabel>
+                          <p className='text-muted-foreground text-xs'>
+                            {t('channels.dialogs.fields.transformOptions.mergeDeveloperRoleIntoSystem.description')}
                           </p>
                         </div>
                         <FormMessage />
