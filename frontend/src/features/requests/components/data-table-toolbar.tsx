@@ -3,8 +3,10 @@ import { Cross2Icon } from '@radix-ui/react-icons';
 import { Table } from '@tanstack/react-table';
 import { RefreshCw, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { useAuthStore } from '@/stores/authStore';
 import { useSelectedProjectId } from '@/stores/projectStore';
+import { graphqlRequest } from '@/gql/graphql';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -13,10 +15,34 @@ import { DataTableFacetedFilter } from '@/components/data-table-faceted-filter';
 import { DateRangePicker } from '@/components/date-range-picker';
 import { DataTableViewOptions } from './data-table-view-options';
 import { useApiKeys } from '@/features/apikeys/data';
+import type { ApiKeyConnection } from '@/features/apikeys/data';
 import { useMe } from '@/features/auth/data/auth';
 import { useAllChannelSummarys } from '@/features/channels/data/channels';
 import { RequestStatus } from '../data/schema';
 import type { DateTimeRangeValue } from '@/utils/date-range';
+
+const SEARCH_API_KEYS_QUERY = `
+  query SearchApiKeysForRequestFilter($first: Int, $after: Cursor, $orderBy: APIKeyOrder, $where: APIKeyWhereInput) {
+    apiKeys(first: $first, after: $after, orderBy: $orderBy, where: $where) {
+      edges {
+        node {
+          id
+          name
+        }
+        cursor
+      }
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+        startCursor
+        endCursor
+      }
+      totalCount
+    }
+  }
+`;
+
+const NOAUTH_API_KEY_TYPE = 'noauth';
 
 
 interface DataTableToolbarProps<TData> {
@@ -39,16 +65,13 @@ export function DataTableToolbar<TData>({
   onDateRangeChange,
   onRefresh,
   showRefresh = false,
-  apiKeyFilter,
-  onApiKeyFilterChange,
-  sourceFilter,
-  onSourceFilterChange,
   autoRefresh = false,
   onAutoRefreshChange,
 }: DataTableToolbarProps<TData>) {
   const { t } = useTranslation();
   const [showArchivedApiKeys, setShowArchivedApiKeys] = useState(false);
   const [showArchivedChannels, setShowArchivedChannels] = useState(false);
+  const [searchedApiKeyOptions, setSearchedApiKeyOptions] = useState<{ value: string; label: string }[]>([]);
   const hasDateRange = !!dateRange?.from || !!dateRange?.to;
   const isFiltered = table.getState().columnFilters.length > 0 || hasDateRange;
 
@@ -140,11 +163,71 @@ export function DataTableToolbar<TData>({
   const apiKeyOptions = useMemo(() => {
     if (!canViewApiKeys || !apiKeysData?.edges) return [];
 
-    return apiKeysData.edges.map((edge) => ({
+    const options = apiKeysData.edges.map((edge) => ({
       value: edge.node.id,
       label: edge.node.name,
     }));
-  }, [canViewApiKeys, apiKeysData]);
+
+    const optionMap = new Map(options.map((option) => [option.value, option]));
+    searchedApiKeyOptions.forEach((option) => {
+      optionMap.set(option.value, option);
+    });
+
+    return Array.from(optionMap.values());
+  }, [canViewApiKeys, apiKeysData, searchedApiKeyOptions]);
+
+  const handleApiKeyInputConfirm = async (value: string) => {
+    if (!canViewApiKeys) {
+      return;
+    }
+
+    const matchedOptions: { value: string; label: string }[] = [];
+    let after: string | undefined;
+
+    for (;;) {
+      const data = await graphqlRequest<{ apiKeys: ApiKeyConnection }>(
+        SEARCH_API_KEYS_QUERY,
+        {
+          first: 100,
+          after,
+          orderBy: { field: 'CREATED_AT', direction: 'DESC' },
+          where: {
+            nameContainsFold: value,
+            statusIn: showArchivedApiKeys ? ['enabled', 'disabled', 'archived'] : ['enabled', 'disabled'],
+            typeNotIn: [NOAUTH_API_KEY_TYPE],
+          },
+        },
+        selectedProjectId ? { 'X-Project-ID': selectedProjectId } : undefined
+      );
+
+      matchedOptions.push(
+        ...data.apiKeys.edges.map((edge) => ({
+          value: edge.node.id,
+          label: edge.node.name,
+        }))
+      );
+
+      after = data.apiKeys.pageInfo.endCursor ?? undefined;
+      if (!data.apiKeys.pageInfo.hasNextPage || !after) {
+        break;
+      }
+    }
+
+    if (matchedOptions.length === 0) {
+      toast.info(t('common.noResultsFound'));
+      return;
+    }
+
+    setSearchedApiKeyOptions((currentOptions) => {
+      const optionMap = new Map(currentOptions.map((option) => [option.value, option]));
+      matchedOptions.forEach((option) => {
+        optionMap.set(option.value, option);
+      });
+      return Array.from(optionMap.values());
+    });
+
+    table.getColumn('apiKey')?.setFilterValue(matchedOptions.map((option) => option.value));
+  };
 
   const requestStatuses = [
     {
@@ -229,6 +312,7 @@ export function DataTableToolbar<TData>({
             column={table.getColumn('apiKey')}
             title={t('requests.filters.apiKey')}
             options={apiKeyOptions}
+            onInputConfirm={handleApiKeyInputConfirm}
             footer={
               <div
                 className='flex items-center space-x-2 px-2 py-1.5'

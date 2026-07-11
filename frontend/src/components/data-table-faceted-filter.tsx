@@ -19,6 +19,7 @@ interface DataTableFacetedFilterProps<TData, TValue> {
   }[];
   singleSelect?: boolean;
   footer?: React.ReactNode;
+  onInputConfirm?: (value: string) => void | Promise<void>;
 }
 
 export function DataTableFacetedFilter<TData, TValue>({
@@ -27,8 +28,10 @@ export function DataTableFacetedFilter<TData, TValue>({
   options = [],
   singleSelect = false,
   footer,
+  onInputConfirm,
 }: DataTableFacetedFilterProps<TData, TValue>) {
   const { t } = useTranslation();
+  const [inputValue, setInputValue] = React.useState('');
 
   const facets = column?.getFacetedUniqueValues() || new Map();
   const filterValue = column?.getFilterValue();
@@ -67,7 +70,24 @@ export function DataTableFacetedFilter<TData, TValue>({
       </PopoverTrigger>
       <PopoverContent className='w-[200px] p-0' align='start'>
         <Command>
-          <CommandInput placeholder={title} />
+          <CommandInput
+            placeholder={title}
+            value={inputValue}
+            onValueChange={setInputValue}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' || !onInputConfirm) {
+                return;
+              }
+
+              const value = inputValue.trim();
+              if (!value) {
+                return;
+              }
+
+              event.preventDefault();
+              void onInputConfirm(value);
+            }}
+          />
           <CommandList>
             <CommandEmpty>{t('common.noResultsFound')}</CommandEmpty>
             <CommandGroup>
