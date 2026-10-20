@@ -82,6 +82,10 @@ func NewEntClient(cfg Config) *ent.Client {
 	opts = append(opts, ent.Driver(drv))
 	client := ent.NewClient(opts...)
 
+	// Adopt indexes that were created by hand before the schema declared them,
+	// otherwise the migration below would build a duplicate index and block writes.
+	reconcileLegacyIndexes(context.Background(), sqlDB, dbDialect)
+
 	err = client.Schema.Create(
 		context.Background(),
 		migrate.WithGlobalUniqueID(false),
