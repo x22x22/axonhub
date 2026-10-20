@@ -102,36 +102,13 @@ func (r *queryResolver) RequestStats(ctx context.Context) (*RequestStats, error)
 	loc := r.systemService.TimeLocation(ctx)
 	period := xtime.GetCalendarPeriods(loc)
 
-	if requestsToday, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.Today.Start)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count today's requests", log.Cause(err))
+	if counts, err := r.countUsageLogsByCalendarPeriods(ctx, period); err != nil {
+		log.Warn(ctx, "failed to count usage logs by calendar period", log.Cause(err))
 	} else {
-		stats.RequestsToday = requestsToday
-	}
-
-	if requestsThisWeek, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.ThisWeek.Start)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count this week's requests", log.Cause(err))
-	} else {
-		stats.RequestsThisWeek = requestsThisWeek
-	}
-
-	if requestsLastWeek, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.LastWeek.Start), usagelog.CreatedAtLT(period.LastWeek.End)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count last week's requests", log.Cause(err))
-	} else {
-		stats.RequestsLastWeek = requestsLastWeek
-	}
-
-	if requestsThisMonth, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.ThisMonth.Start)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count this month's requests", log.Cause(err))
-	} else {
-		stats.RequestsThisMonth = requestsThisMonth
+		stats.RequestsToday = counts.Today
+		stats.RequestsThisWeek = counts.ThisWeek
+		stats.RequestsLastWeek = counts.LastWeek
+		stats.RequestsThisMonth = counts.ThisMonth
 	}
 
 	return stats, nil
