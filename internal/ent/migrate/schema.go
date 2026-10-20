@@ -498,6 +498,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{RequestsColumns[1]},
 			},
+			{
+				Name:    "requests_by_status",
+				Unique:  false,
+				Columns: []*schema.Column{RequestsColumns[11]},
+			},
 		},
 	}
 	// RequestExecutionsColumns holds the columns for the "request_executions" table.

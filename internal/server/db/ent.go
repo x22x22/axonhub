@@ -82,11 +82,21 @@ func NewEntClient(cfg Config) *ent.Client {
 	opts = append(opts, ent.Driver(drv))
 	client := ent.NewClient(opts...)
 
+	// Adopt indexes that were created by hand before the schema declared them,
+	// otherwise the migration below would build a duplicate index and block writes.
+	reconcileLegacyIndexes(context.Background(), sqlDB, dbDialect)
+
 	err = client.Schema.Create(
 		context.Background(),
 		migrate.WithGlobalUniqueID(false),
 		migrate.WithForeignKeys(false),
-		migrate.WithDropIndex(true),
+		// Never drop indexes that the schema does not know about: the automatic
+		// migration used to delete every index missing from the ent schema, which
+		// silently removed indexes created by operators to fix production incidents
+		// (a hand-built requests.status index was lost this way when an older binary
+		// started after a reboot). Dropping an index now requires an explicit
+		// migration.
+		migrate.WithDropIndex(false),
 		migrate.WithDropColumn(true),
 		schema.WithHooks(schemahook.V0_3_0),
 	)

@@ -1,0 +1,17 @@
+-- Dashboard status aggregation (resolver DashboardOverview) groups the requests
+-- table by status. Without an index on status the query degenerates into a full
+-- heap scan: on a ~1M row / ~500GB bytea+toast table it took ~3.8s and saturated
+-- the database, which made the gateway fail its own model lookup with
+-- "context deadline exceeded".
+--
+-- PostgreSQL: build the index concurrently BEFORE rolling out the new binary.
+-- The ent auto-migration (internal/server/db.NewEntClient -> Schema.Create) adds
+-- the same index on startup, but it issues a plain CREATE INDEX that blocks
+-- writes for the duration of the build on large tables.
+--
+-- MySQL: use the online variant instead:
+--   ALTER TABLE requests ADD INDEX requests_by_status (status), ALGORITHM=INPLACE, LOCK=NONE;
+--
+-- The index is declared in internal/ent/schema/request.go, so fresh
+-- installations and SQLite dev databases get it automatically.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_by_status ON requests (status);
