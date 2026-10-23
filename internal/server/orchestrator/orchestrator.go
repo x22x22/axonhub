@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/looplj/axonhub/internal/authz"
@@ -38,19 +39,18 @@ func NewChatCompletionOrchestrator(
 
 	rateLimitStrategy := NewRateLimitAwareStrategy(rateLimitTracker, connectionTracker)
 
-	adaptiveLoadBalancer := NewLoadBalancer(systemService, channelService,
-		NewTraceAwareStrategy(requestService),
-		NewErrorAwareStrategy(channelService),
-		NewWeightRoundRobinStrategy(channelService),
-		NewLatencyAwareStrategy(channelService),
+	// Every load balancer keeps the trace-aware strategy: a chat conversation that
+	// hops between channels loses the upstream prompt cache, and with a large system
+	// prompt every hop pays a full prefill again. Picking a non-adaptive strategy (for
+	// example a per-API-key profile override) must not silently drop that affinity.
+	adaptiveLoadBalancer, failoverLoadBalancer, circuitBreakerLoadBalancer := newLoadBalancers(
+		systemService,
+		channelService,
+		channelService,
+		requestService,
+		modelCircuitBreaker,
 		rateLimitStrategy,
 	)
-
-	failoverLoadBalancer := NewLoadBalancer(systemService, channelService,
-		NewWeightStrategy(), NewRandomStrategy(), rateLimitStrategy)
-
-	circuitBreakerLoadBalancer := NewLoadBalancer(systemService, channelService,
-		NewWeightStrategy(), NewModelAwareCircuitBreakerStrategy(modelCircuitBreaker), rateLimitStrategy)
 
 	return &ChatCompletionOrchestrator{
 		Inbound:            inbound,
@@ -107,6 +107,11 @@ type ChatCompletionOrchestrator struct {
 	rateLimitTracker *ChannelRequestTracker
 	// The model circuit breaker for circuit-breaker load balancing.
 	modelCircuitBreaker *biz.ModelCircuitBreaker
+
+	// lastLoggedStrategy remembers the effective load balancing strategy that was last
+	// written to the log, so the first request after a strategy change logs it at info
+	// level without logging every request.
+	lastLoggedStrategy atomic.Value
 
 	// proxy is the proxy configuration for testing
 	// If set, it will override the channel's default proxy configuration
@@ -171,6 +176,8 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 	default:
 		// Default to adaptive load balancer
 	}
+
+	processor.logStrategy(ctx, strategy, retryPolicy.LoadBalancerStrategy)
 
 	state := &PersistenceState{
 		APIKey:                apiKey,
@@ -310,4 +317,71 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		ChatCompletion:       result.Response,
 		ChatCompletionStream: nil,
 	}, nil
+}
+
+// newLoadBalancers builds the three channel load balancers used by chat completion
+// routing. The trace aware strategy is registered in every set, because all of them
+// can be selected through the system default or through an API key profile override.
+//
+// Trace affinity is not a cosmetic preference here: when a conversation moves to
+// another channel, that channel has no upstream prompt cache for the conversation
+// prefix, so the whole prefix (often 200k+ tokens for an agent session) is prefilled
+// again on every turn. Losing affinity therefore multiplies latency by the size of
+// the fixed prefix, which is exactly what a "failover"/"random" strategy set does.
+func newLoadBalancers(
+	systemService RetryPolicyProvider,
+	selectionTracker ChannelSelectionTracker,
+	metricsProvider ChannelMetricsProvider,
+	traceProvider ChannelTraceProvider,
+	modelCircuitBreaker *biz.ModelCircuitBreaker,
+	rateLimitStrategy LoadBalanceStrategy,
+) (adaptive, failover, circuitBreaker *LoadBalancer) {
+	adaptive = NewLoadBalancer(systemService, selectionTracker,
+		NewTraceAwareStrategy(traceProvider),
+		NewErrorAwareStrategy(metricsProvider),
+		NewWeightRoundRobinStrategy(metricsProvider),
+		NewLatencyAwareStrategy(metricsProvider),
+		rateLimitStrategy,
+	)
+
+	failover = NewLoadBalancer(systemService, selectionTracker,
+		NewTraceAwareStrategy(traceProvider),
+		NewWeightStrategy(),
+		NewRandomStrategy(),
+		rateLimitStrategy,
+	)
+
+	circuitBreaker = NewLoadBalancer(systemService, selectionTracker,
+		NewTraceAwareStrategy(traceProvider),
+		NewWeightStrategy(),
+		NewModelAwareCircuitBreakerStrategy(modelCircuitBreaker),
+		rateLimitStrategy,
+	)
+
+	return adaptive, failover, circuitBreaker
+}
+
+// logStrategy records the effective load balancing strategy. Strategy transitions are
+// logged at info level, so a profile override that silently drops trace affinity can
+// be traced from logs instead of being inferred from cache miss patterns later.
+func (processor *ChatCompletionOrchestrator) logStrategy(ctx context.Context, strategy, systemDefault string) {
+	previous, _ := processor.lastLoggedStrategy.Load().(string)
+	if previous == strategy {
+		if log.DebugEnabled(ctx) {
+			log.Debug(ctx, "chat completion load balancer strategy",
+				log.String("strategy", strategy),
+				log.String("system_default", systemDefault),
+			)
+		}
+
+		return
+	}
+
+	processor.lastLoggedStrategy.Store(strategy)
+
+	log.Info(ctx, "chat completion load balancer strategy in effect",
+		log.String("strategy", strategy),
+		log.String("system_default", systemDefault),
+		log.String("previous_strategy", previous),
+	)
 }
