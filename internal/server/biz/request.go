@@ -982,7 +982,70 @@ func (s *RequestService) UpdateRequestChannelID(ctx context.Context, requestID i
 		s.setLastSuccessfulChannelID(ctx, request.TraceID, channelID)
 	}
 
+	// Remember the channel as soon as it is selected, so the next turn of the same
+	// conversation can pin it. Waiting for the request to complete is too late: an agent
+	// client sends the next turn immediately after the previous response finishes.
+	s.cachePreviousChannelForRequest(ctx, request)
+
 	return nil
+}
+
+// cachePreviousChannelForRequest records the channel that was just selected for the
+// request's trace (and its thread, when known). The entry lives in the previous-channel
+// cache for 30 minutes, which is how long a conversation keeps its upstream prompt cache.
+func (s *RequestService) cachePreviousChannelForRequest(ctx context.Context, req *ent.Request) {
+	if req == nil || req.ChannelID == 0 || req.TraceID == 0 {
+		return
+	}
+
+	s.setPreviousChannelCache(ctx, buildPreviousTraceChannelCacheKey(req.TraceID), req.ChannelID)
+
+	threadID := 0
+	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil && trace.ID == req.TraceID {
+		threadID = trace.ThreadID
+	}
+
+	if threadID == 0 {
+		return
+	}
+
+	s.setPreviousChannelCache(ctx, buildPreviousThreadChannelCacheKey(threadID), req.ChannelID)
+}
+
+// GetPreviousChannelID returns the channel that was last selected for a trace, without
+// falling back to the database. The cache is the source of truth: when it expires, trace
+// affinity is reset. Keeping it cache-only means the channel selector can ask once per
+// request without adding database load on the hot path.
+func (s *RequestService) GetPreviousChannelID(ctx context.Context, traceID int) (int, error) {
+	channelID, err := s.channelCache.Get(ctx, buildPreviousTraceChannelCacheKey(traceID))
+	if err != nil {
+		return 0, nil
+	}
+
+	return channelID, nil
+}
+
+// GetPreviousChannelIDByThread is the thread-level counterpart of GetPreviousChannelID,
+// used when the trace has no recorded channel yet (for example after a tracing reset).
+func (s *RequestService) GetPreviousChannelIDByThread(ctx context.Context, threadID int) (int, error) {
+	channelID, err := s.channelCache.Get(ctx, buildPreviousThreadChannelCacheKey(threadID))
+	if err != nil {
+		return 0, nil
+	}
+
+	return channelID, nil
+}
+
+func (s *RequestService) setPreviousChannelCache(ctx context.Context, cacheKey string, channelID int) {
+	_ = s.channelCache.Set(ctx, cacheKey, channelID, store.WithExpiration(30*time.Minute))
+}
+
+func buildPreviousTraceChannelCacheKey(traceID int) string {
+	return fmt.Sprintf("previous_channel:trace:%d", traceID)
+}
+
+func buildPreviousThreadChannelCacheKey(threadID int) string {
+	return fmt.Sprintf("previous_channel:thread:%d", threadID)
 }
 
 // LoadRequestBody returns the stored request body, loading from external storage when necessary.

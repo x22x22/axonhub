@@ -1,0 +1,36 @@
+{
+  "_source": {
+    "captured_from": "prod2 axonhub2 postgres, requests.id=12089886",
+    "captured_at": "2026-10-22T08:28:08Z",
+    "desensitized": "Authorization removed, opencode session id masked, request body omitted (779830 bytes)",
+    "why": "shape of a real AIS opencode (codex_cli_rs runtime) chat completion request; every header value is a JSON-array string as sent by the client"
+  },
+  "headers": {
+    "Accept": "[\"*/*\"]",
+    "Accept-Encoding": "[\"gzip, deflate, br, zstd\"]",
+    "Connection": "[\"keep-alive\"]",
+    "Content-Type": "[\"application/json\"]",
+    "Originator": "[\"codex_cli_rs\"]",
+    "Session_id": "[\"ses_fixture0000000000000000\"]",
+    "User-Agent": "[\"codex_cli_rs/0.38.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13\"]",
+    "X-Session-Affinity": "[\"ses_fixture0000000000000000\"]"
+  },
+  "body": {
+    "model": "ais-prod/glm-5.3",
+    "stream": true,
+    "message_count": 2,
+    "tool_count": 25,
+    "body_bytes": 779830
+  },
+  "channel_pool": {
+    "note": "zai-coding account pool serving ais-prod/glm-5.3; all channels share ordering_weight 100",
+    "count": 48,
+    "ordering_weight": 100
+  },
+  "observed_turns": {
+    "note": "slow session fsd-pd0253-d5c1ec5d used 35 distinct channels over 59 assistant turns while the load balancer had no trace affinity",
+    "turns": 59,
+    "distinct_channels": 35,
+    "channel_pool_size": 48
+  }
+}

@@ -63,7 +63,19 @@ func selectCandidates(inbound *PersistentInboundTransformer) pipeline.Middleware
 		selector = WithStreamPolicySelector(selector)
 
 		if inbound.state.LoadBalancer != nil {
-			selector = WithLoadBalancedSelector(selector, inbound.state.LoadBalancer, inbound.state.RetryPolicyProvider)
+			// Keep the conversation on the channel it already used: a channel switch throws
+			// away the upstream prompt cache, and for an agent session the fixed prefix can
+			// be hundreds of thousands of tokens that then has to be prefilled again.
+			if inbound.state.RequestService != nil {
+				selector = WithTraceStickyLoadBalancedSelector(
+					selector,
+					inbound.state.LoadBalancer,
+					inbound.state.RetryPolicyProvider,
+					inbound.state.RequestService,
+				)
+			} else {
+				selector = WithLoadBalancedSelector(selector, inbound.state.LoadBalancer, inbound.state.RetryPolicyProvider)
+			}
 		}
 
 		candidates, err := selector.Select(ctx, llmRequest)

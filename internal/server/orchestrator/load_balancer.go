@@ -163,6 +163,27 @@ func (lb *LoadBalancer) Sort(ctx context.Context, candidates []*ChannelModelsCan
 	return lb.sortProduction(ctx, candidates, topK)
 }
 
+// ScoreCandidate returns the total strategy score of a single candidate without sorting
+// anything else. Callers use it to validate a candidate they intend to pin (for example
+// the channel of the previous turn): a channel the strategies consider unusable scores
+// far below every healthy channel, so affinity can yield to availability.
+func (lb *LoadBalancer) ScoreCandidate(ctx context.Context, model string, stream bool, candidate *ChannelModelsCandidate) float64 {
+	if lb == nil || candidate == nil || candidate.Channel == nil {
+		return 0
+	}
+
+	ctx = contextWithRequestedModel(ctx, model)
+	ctx = contextWithRequestStream(ctx, stream)
+
+	total := 0.0
+
+	for _, strategy := range lb.strategies {
+		total += strategy.Score(ctx, candidate.Channel)
+	}
+
+	return total
+}
+
 // sortProduction is the fast path without debug overhead.
 // Uses partial sorting to efficiently get only the top k candidates.
 func (lb *LoadBalancer) sortProduction(ctx context.Context, candidates []*ChannelModelsCandidate, topK int) []*ChannelModelsCandidate {

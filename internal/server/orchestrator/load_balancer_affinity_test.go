@@ -18,6 +18,15 @@ func (affinityRetryPolicy) RetryPolicyOrDefault(context.Context) *biz.RetryPolic
 	return &biz.RetryPolicy{Enabled: false}
 }
 
+// retryEnabledPolicy enables channel retries for the top-K tests.
+type retryEnabledPolicy struct {
+	maxChannelRetries int
+}
+
+func (p retryEnabledPolicy) RetryPolicyOrDefault(context.Context) *biz.RetryPolicy {
+	return &biz.RetryPolicy{Enabled: true, MaxChannelRetries: p.maxChannelRetries}
+}
+
 // affinityMetricsProvider reports empty metrics, which is the worst case for trace
 // affinity: every other channel scores its maximum and only the trace bonus can win.
 type affinityMetricsProvider struct{}
@@ -76,68 +85,59 @@ func newTestLoadBalancersWithTracker(t *testing.T, tracker *ChannelRequestTracke
 	}
 }
 
-// Every strategy set must keep the trace aware strategy. Without it a per-API-key
-// profile override (failover / circuit-breaker) makes each request pick a random
-// channel, which throws away the upstream prompt cache on every conversation turn.
-func TestLoadBalancerStrategySetsContainTraceAware(t *testing.T) {
-	for name, balancer := range newTestLoadBalancers(t) {
-		t.Run(name, func(t *testing.T) {
-			found := false
+// The adaptive set keeps its historical trace-aware strategy; conversation affinity for
+// the other strategy sets is provided by the channel selector, not by a strategy.
+func TestAdaptiveLoadBalancerKeepsTraceAwareStrategy(t *testing.T) {
+	adaptive := newTestLoadBalancers(t)["adaptive"]
 
-			for _, strategy := range balancer.strategies {
-				if strategy.Name() == "TraceAware" {
-					found = true
+	found := false
 
-					break
-				}
-			}
+	for _, strategy := range adaptive.strategies {
+		if strategy.Name() == "TraceAware" {
+			found = true
 
-			if !found {
-				t.Fatalf("%s load balancer is missing TraceAwareStrategy", name)
-			}
-		})
+			break
+		}
+	}
+
+	if !found {
+		t.Fatal("adaptive load balancer is missing its TraceAwareStrategy")
 	}
 }
 
 // With 48 equally weighted channels, only the trace bonus can keep the request on the
 // channel that already served this trace.
-func TestLoadBalancersKeepTraceAffinity(t *testing.T) {
+func TestAdaptiveLoadBalancerKeepsTraceAffinity(t *testing.T) {
 	ctx := contexts.WithTrace(context.Background(), &ent.Trace{ID: 42})
 	candidates := newAffinityCandidates(48)
+	adaptive := newTestLoadBalancers(t)["adaptive"]
 
-	for name, balancer := range newTestLoadBalancers(t) {
-		t.Run(name, func(t *testing.T) {
-			sorted := balancer.Sort(ctx, candidates, "ais-prod/glm-5.3", true)
-			if len(sorted) == 0 {
-				t.Fatalf("%s load balancer returned no candidates", name)
-			}
+	sorted := adaptive.Sort(ctx, candidates, "ais-prod/glm-5.3", true)
+	if len(sorted) == 0 {
+		t.Fatal("adaptive load balancer returned no candidates")
+	}
 
-			if got := sorted[0].Channel.ID; got != 7 {
-				t.Fatalf("%s load balancer selected channel %d, want the trace channel 7", name, got)
-			}
-		})
+	if got := sorted[0].Channel.ID; got != 7 {
+		t.Fatalf("adaptive load balancer selected channel %d, want the trace channel 7", got)
 	}
 }
 
 // Trace affinity must never resurrect a channel that is cooling down after a 429:
-// availability still wins over cache reuse.
-func TestLoadBalancersRespectCooldownOverTraceAffinity(t *testing.T) {
+// availability still wins over cache reuse. This covers the strategy path.
+func TestAdaptiveLoadBalancerRespectsCooldownOverTraceAffinity(t *testing.T) {
 	tracker := NewChannelRequestTracker()
 	tracker.SetCooldown(7, time.Now().Add(time.Minute))
 
 	ctx := contexts.WithTrace(context.Background(), &ent.Trace{ID: 42})
 	candidates := newAffinityCandidates(48)
+	adaptive := newTestLoadBalancersWithTracker(t, tracker)["adaptive"]
 
-	for name, balancer := range newTestLoadBalancersWithTracker(t, tracker) {
-		t.Run(name, func(t *testing.T) {
-			sorted := balancer.Sort(ctx, candidates, "ais-prod/glm-5.3", true)
-			if len(sorted) == 0 {
-				t.Fatalf("%s load balancer returned no candidates", name)
-			}
+	sorted := adaptive.Sort(ctx, candidates, "ais-prod/glm-5.3", true)
+	if len(sorted) == 0 {
+		t.Fatal("adaptive load balancer returned no candidates")
+	}
 
-			if sorted[0].Channel.ID == 7 {
-				t.Fatalf("%s load balancer kept the cooling channel 7", name)
-			}
-		})
+	if sorted[0].Channel.ID == 7 {
+		t.Fatal("adaptive load balancer kept the cooling channel 7")
 	}
 }

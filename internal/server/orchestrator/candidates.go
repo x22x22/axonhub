@@ -9,6 +9,7 @@ import (
 
 	"github.com/samber/lo"
 
+	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/model"
 	"github.com/looplj/axonhub/internal/log"
@@ -441,11 +442,23 @@ func (s *SelectedChannelsSelector) Select(ctx context.Context, req *llm.Request)
 	return filtered, nil
 }
 
+// PreviousChannelProvider resolves the channel that served the same trace or thread
+// before. Implementations are expected to answer from a cache: the selector asks once
+// per request, on the hot path.
+type PreviousChannelProvider interface {
+	GetPreviousChannelID(ctx context.Context, traceID int) (int, error)
+	GetPreviousChannelIDByThread(ctx context.Context, threadID int) (int, error)
+}
+
 // LoadBalancedSelector is a decorator that sorts candidates using load balancing strategies.
 type LoadBalancedSelector struct {
 	wrapped      CandidateSelector
 	loadBalancer *LoadBalancer
 	policy       RetryPolicyProvider
+	// previousChannelProvider, when set, pins the channel that served the previous turn of
+	// the same conversation. Staying on one channel keeps the upstream prompt cache warm;
+	// a switch forces a full prefill of the whole conversation prefix on every turn.
+	previousChannelProvider PreviousChannelProvider
 }
 
 // WithLoadBalancedSelector creates a selector that applies load balancing to sort candidates.
@@ -455,6 +468,24 @@ func WithLoadBalancedSelector(wrapped CandidateSelector, loadBalancer *LoadBalan
 		wrapped:      wrapped,
 		loadBalancer: loadBalancer,
 		policy:       policy,
+	}
+}
+
+// WithTraceStickyLoadBalancedSelector creates a selector that prefers the channel which
+// served the previous turn of the same trace (or thread) before applying load balancing.
+// The affinity is resolved once per request and pinned as the first candidate, so a large
+// conversation prefix does not get re-prefilled on a different channel every turn.
+func WithTraceStickyLoadBalancedSelector(
+	wrapped CandidateSelector,
+	loadBalancer *LoadBalancer,
+	policy RetryPolicyProvider,
+	previousChannelProvider PreviousChannelProvider,
+) *LoadBalancedSelector {
+	return &LoadBalancedSelector{
+		wrapped:                 wrapped,
+		loadBalancer:            loadBalancer,
+		policy:                  policy,
+		previousChannelProvider: previousChannelProvider,
 	}
 }
 
@@ -474,6 +505,122 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 	requiredCount := 1
 	if retryPolicy.Enabled {
 		requiredCount = 1 + retryPolicy.MaxChannelRetries
+	}
+
+	// Prefer the channel that served the previous turn of this conversation.
+	if s.previousChannelProvider != nil {
+		if stickyChannelID, ok := s.resolvePreviousChannelID(ctx, candidates); ok {
+			if pinned, remaining := extractStickyCandidate(candidates, stickyChannelID); pinned != nil {
+				// Pinning must not override availability: a channel that is cooling down
+				// after a 429 (or saturated) is scored far below every healthy channel, in
+				// which case affinity yields and normal load balancing takes over.
+				if s.isStickyCandidateUsable(ctx, req, pinned) {
+					fallback := s.rankCandidates(ctx, req, remaining, requiredCount-1)
+
+					if log.DebugEnabled(ctx) {
+						log.Debug(ctx, "keeping trace channel affinity",
+							log.String("model", req.Model),
+							log.Int("channel_id", stickyChannelID),
+							log.Int("fallback_count", len(fallback)),
+						)
+					}
+
+					return append([]*ChannelModelsCandidate{pinned}, fallback...), nil
+				}
+			}
+		}
+	}
+
+	return s.rankCandidates(ctx, req, candidates, requiredCount), nil
+}
+
+// stickyCandidateMinScore is the floor below which a pinned candidate is treated as
+// unusable. Healthy channels score positive values (weight/health/latency), while the
+// rate-limit strategy returns rateLimitExhaustedScore (-10000) for cooling channels and
+// channels whose concurrency budget is exhausted.
+const stickyCandidateMinScore = -1000.0
+
+func (s *LoadBalancedSelector) isStickyCandidateUsable(ctx context.Context, req *llm.Request, candidate *ChannelModelsCandidate) bool {
+	if s.loadBalancer == nil {
+		return true
+	}
+
+	useStream := req.Stream != nil && *req.Stream
+
+	return s.loadBalancer.ScoreCandidate(ctx, req.Model, useStream, candidate) > stickyCandidateMinScore
+}
+
+// resolvePreviousChannelID returns the channel used by the previous turn, preferring the
+// trace level mapping and falling back to the thread level one. A channel that is no
+// longer among the candidates (archived, filtered by a profile, unavailable) is ignored.
+func (s *LoadBalancedSelector) resolvePreviousChannelID(ctx context.Context, candidates []*ChannelModelsCandidate) (int, bool) {
+	hasCandidate := func(channelID int) bool {
+		if channelID == 0 {
+			return false
+		}
+
+		for _, candidate := range candidates {
+			if candidate != nil && candidate.Channel != nil && candidate.Channel.ID == channelID {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil {
+		if channelID, err := s.previousChannelProvider.GetPreviousChannelID(ctx, trace.ID); err == nil && hasCandidate(channelID) {
+			return channelID, true
+		}
+	}
+
+	threadID := 0
+	if thread, ok := contexts.GetThread(ctx); ok && thread != nil {
+		threadID = thread.ID
+	} else if trace, ok := contexts.GetTrace(ctx); ok && trace != nil {
+		threadID = trace.ThreadID
+	}
+
+	if threadID == 0 {
+		return 0, false
+	}
+
+	if channelID, err := s.previousChannelProvider.GetPreviousChannelIDByThread(ctx, threadID); err == nil && hasCandidate(channelID) {
+		return channelID, true
+	}
+
+	return 0, false
+}
+
+// extractStickyCandidate removes one instance of the pinned channel from the candidate
+// list so it cannot also consume a fallback slot.
+func extractStickyCandidate(candidates []*ChannelModelsCandidate, channelID int) (*ChannelModelsCandidate, []*ChannelModelsCandidate) {
+	remaining := make([]*ChannelModelsCandidate, 0, len(candidates))
+
+	var pinned *ChannelModelsCandidate
+
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.Channel == nil {
+			continue
+		}
+
+		if pinned == nil && candidate.Channel.ID == channelID {
+			pinned = candidate
+
+			continue
+		}
+
+		remaining = append(remaining, candidate)
+	}
+
+	return pinned, remaining
+}
+
+// rankCandidates groups candidates by priority (lower value = higher priority) and applies
+// the load balancer inside each group until limit candidates have been collected.
+func (s *LoadBalancedSelector) rankCandidates(ctx context.Context, req *llm.Request, candidates []*ChannelModelsCandidate, limit int) []*ChannelModelsCandidate {
+	if limit <= 0 || len(candidates) == 0 {
+		return nil
 	}
 
 	// Group candidates by priority first (lower priority value = higher priority)
@@ -500,7 +647,7 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 		sortedCandidates := s.loadBalancer.Sort(ctx, group, req.Model, useStream)
 
 		// Add candidates, but stop if we have enough
-		remaining := requiredCount - len(result)
+		remaining := limit - len(result)
 		if remaining <= 0 {
 			break
 		}
@@ -518,10 +665,10 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 			log.String("model", req.Model),
 			log.Int("total_candidates", len(candidates)),
 			log.Int("sorted_candidates", len(result)),
-			log.Int("required_count", requiredCount))
+			log.Int("required_count", limit))
 	}
 
-	return result, nil
+	return result
 }
 
 // TagsFilterSelector is a decorator that filters candidates by allowed channel tags.

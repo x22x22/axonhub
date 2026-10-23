@@ -320,14 +320,14 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 }
 
 // newLoadBalancers builds the three channel load balancers used by chat completion
-// routing. The trace aware strategy is registered in every set, because all of them
-// can be selected through the system default or through an API key profile override.
+// routing. Conversation affinity is not a strategy here: the channel selector pins the
+// channel of the previous turn before any of these balancers run (see
+// WithTraceStickyLoadBalancedSelector), so neither a profile override nor a different
+// strategy set can drop it.
 //
-// Trace affinity is not a cosmetic preference here: when a conversation moves to
-// another channel, that channel has no upstream prompt cache for the conversation
-// prefix, so the whole prefix (often 200k+ tokens for an agent session) is prefilled
-// again on every turn. Losing affinity therefore multiplies latency by the size of
-// the fixed prefix, which is exactly what a "failover"/"random" strategy set does.
+// The adaptive set keeps its historical trace-aware strategy for the case where the
+// selector has no previous channel yet; the failover and circuit-breaker sets stay
+// weight/health driven.
 func newLoadBalancers(
 	systemService RetryPolicyProvider,
 	selectionTracker ChannelSelectionTracker,
@@ -345,14 +345,12 @@ func newLoadBalancers(
 	)
 
 	failover = NewLoadBalancer(systemService, selectionTracker,
-		NewTraceAwareStrategy(traceProvider),
 		NewWeightStrategy(),
 		NewRandomStrategy(),
 		rateLimitStrategy,
 	)
 
 	circuitBreaker = NewLoadBalancer(systemService, selectionTracker,
-		NewTraceAwareStrategy(traceProvider),
 		NewWeightStrategy(),
 		NewModelAwareCircuitBreakerStrategy(modelCircuitBreaker),
 		rateLimitStrategy,
