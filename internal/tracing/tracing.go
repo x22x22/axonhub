@@ -40,6 +40,13 @@ type Config struct {
 	// CodexTraceEnabled enables extracting trace IDs from Codex request headers.
 	// Default to false.
 	CodexTraceEnabled bool `conf:"codex_trace_enabled" yaml:"codex_trace_enabled" json:"codex_trace_enabled"`
+
+	// OpenCodeTraceEnabled enables extracting trace IDs from OpenCode session headers
+	// (X-Opencode-Session, X-Session-Id and the legacy X-Session-Affinity).
+	// It only applies when neither the primary trace header nor ExtraTraceHeaders matched,
+	// so ExtraTraceHeaders keeps working for clients that expose any other header.
+	// Default to false.
+	OpenCodeTraceEnabled bool `conf:"opencode_trace_enabled" yaml:"opencode_trace_enabled" json:"opencode_trace_enabled"`
 }
 
 // GenerateTraceID generate trace id, format as at-{{uuid}}.

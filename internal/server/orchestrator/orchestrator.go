@@ -237,6 +237,9 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// applyPassThroughBody runs first so that override operations can still modify the pass-through body.
 		applyPassThroughRequestBody(outbound),
 		applyOverrideRequestBody(outbound),
+		// applySessionHeader runs before header overrides so a conversation keeps one
+		// upstream session id, while configured overrides still win.
+		applySessionHeader(),
 		// applyUserAgentPassThrough runs before header overrides to set the initial
 		// User-Agent value (either from client pass-through or default "axonhub/1.0").
 		// This allows override headers to modify the User-Agent if configured.

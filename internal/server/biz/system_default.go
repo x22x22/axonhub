@@ -23,8 +23,9 @@ var defaultRetryPolicy = RetryPolicy{
 	MaxChannelRetries:       3,
 	MaxSingleChannelRetries: 2,
 	RetryDelayMs:            1000,
-	LoadBalancerStrategy:    "adaptive",
+	LoadBalancerStrategy:    LoadBalancerStrategyAdaptive,
 	Enabled:                 true,
+	TraceStickyMode:         TraceStickyPreferPreviousChannel,
 }
 
 var defaultModelSettings = SystemModelSettings{

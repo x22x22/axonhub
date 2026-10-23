@@ -486,3 +486,42 @@ func BenchmarkProd2StickySelectorMiss(b *testing.B) {
 		selector.Select(ctx, req)
 	}
 }
+
+// TraceStickyMode=disabled must skip the affinity path entirely: no previous-channel
+// lookup, and independent balancing on every turn.
+type stickyDisabledPolicy struct{}
+
+func (stickyDisabledPolicy) RetryPolicyOrDefault(context.Context) *biz.RetryPolicy {
+	return &biz.RetryPolicy{Enabled: false, TraceStickyMode: biz.TraceStickyDisabled}
+}
+
+func TestStickySelectorDisabledModeBalancesIndependently(t *testing.T) {
+	fixture := mustLoadProd2Fixture(t)
+	provider := newStickyTraceProvider()
+	provider.record(42, 1007)
+
+	selector := prod2StickySelector(fixture, prod2FailoverBalancer(), stickyDisabledPolicy{}, provider)
+	ctx := prod2TraceContext(42)
+	req := prod2Request(fixture)
+
+	provider.resetCalls()
+
+	distinct := make(map[int]struct{})
+
+	for turn := 0; turn < fixture.ObservedTurns.Turns; turn++ {
+		result, err := selector.Select(ctx, req)
+		if err != nil {
+			t.Fatalf("turn %d: %v", turn, err)
+		}
+
+		distinct[result[0].Channel.ID] = struct{}{}
+	}
+
+	if got := provider.calls.Load(); got != 0 {
+		t.Fatalf("previous channel lookups = %d, want 0 when trace sticky mode is disabled", got)
+	}
+
+	if len(distinct) <= 1 {
+		t.Fatalf("disabled mode still pinned one channel (%d distinct), want independent balancing", len(distinct))
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/looplj/axonhub/internal/tracing"
 	"github.com/looplj/axonhub/llm/transformer/anthropic/claudecode"
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
+	"github.com/looplj/axonhub/llm/transformer/opencode"
 	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
@@ -78,6 +79,10 @@ func tryGetTraceIDFromBody(c *gin.Context, config tracing.Config) (string, error
 func WithTrace(config tracing.Config, traceService *biz.TraceService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		traceID := getTraceIDFromHeader(c, config)
+		if traceID == "" && config.OpenCodeTraceEnabled {
+			traceID = tryExtractTraceIDFromOpenCodeRequest(c)
+		}
+
 		if traceID == "" && config.ClaudeCodeTraceEnabled {
 			var err error
 
@@ -200,6 +205,20 @@ func tryExtractTraceIDFromCodexRequest(c *gin.Context) string {
 		traceSource = "codex turn metadata"
 	}
 	log.Debug(c.Request.Context(), "Extracted trace ID from "+traceSource, log.String("trace_id", traceID))
+
+	return traceID
+}
+
+// tryExtractTraceIDFromOpenCodeRequest extracts the trace ID from the OpenCode session
+// headers. This only runs when the primary trace header and ExtraTraceHeaders produced
+// nothing, so a deployment can keep using an arbitrary header as the trace source.
+func tryExtractTraceIDFromOpenCodeRequest(c *gin.Context) string {
+	traceID := opencode.GetSessionIDFromHeaders(c.Request.Header)
+	if traceID == "" {
+		return ""
+	}
+
+	log.Debug(c.Request.Context(), "Extracted trace ID from opencode header", log.String("trace_id", traceID))
 
 	return traceID
 }

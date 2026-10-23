@@ -124,6 +124,7 @@ type RetryPolicy {
   enabled: Boolean!
   autoDisableChannel: AutoDisableChannel!
   emptyResponseDetection: Boolean!
+  traceStickyMode: String!
 }
 
 input AutoDisableChannelStatusInput {
@@ -144,6 +145,7 @@ input UpdateRetryPolicyInput {
   enabled: Boolean
   autoDisableChannel: AutoDisableChannelInput
   emptyResponseDetection: Boolean
+  traceStickyMode: String
 }
 
 type SystemModelSettings {

@@ -507,8 +507,10 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 		requiredCount = 1 + retryPolicy.MaxChannelRetries
 	}
 
-	// Prefer the channel that served the previous turn of this conversation.
-	if s.previousChannelProvider != nil {
+	// Prefer the channel that served the previous turn of this conversation. The mode is
+	// configurable (RetryPolicy.TraceStickyMode): "disabled" balances every request
+	// independently, which is what an operator wants when channels must be spread evenly.
+	if s.previousChannelProvider != nil && biz.NormalizeTraceStickyMode(retryPolicy.TraceStickyMode) == biz.TraceStickyPreferPreviousChannel {
 		if stickyChannelID, ok := s.resolvePreviousChannelID(ctx, candidates); ok {
 			if pinned, remaining := extractStickyCandidate(candidates, stickyChannelID); pinned != nil {
 				// Pinning must not override availability: a channel that is cooling down
