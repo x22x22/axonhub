@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.uber.org/fx"
 
 	"github.com/looplj/axonhub/internal/log"
@@ -30,6 +31,8 @@ func New(config Config) *Server {
 	}
 
 	engine := gin.New()
+	// OTLP 链路（ClickStack）：未配置 OTEL_EXPORTER_OTLP_ENDPOINT 时 otelgin 为 no-op。
+	engine.Use(otelgin.Middleware("axonhub"))
 	engine.Use(middleware.Recovery())
 
 	return &Server{

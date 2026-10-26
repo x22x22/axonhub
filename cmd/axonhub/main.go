@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	sdk "go.opentelemetry.io/otel/sdk/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/looplj/axonhub/conf"
 	"github.com/looplj/axonhub/internal/build"
@@ -22,6 +23,7 @@ import (
 	"github.com/looplj/axonhub/internal/metrics"
 	"github.com/looplj/axonhub/internal/server"
 	"github.com/looplj/axonhub/internal/server/biz"
+	"github.com/looplj/axonhub/internal/trace"
 	"github.com/looplj/axonhub/llm/transformer/antigravity"
 )
 
@@ -65,6 +67,18 @@ func startServer() {
 		}),
 		fx.Provide(conf.Load),
 		fx.Provide(metrics.NewProvider),
+		fx.Provide(trace.NewProvider),
+		// The tracer provider is a lazily constructed Fx value: without a consumer the
+		// constructor never runs and tracing stays disabled. This Invoke also registers the
+		// shutdown, which flushes the batcher; otherwise the spans queued for the last
+		// requests (including the ones in flight during a deployment) are dropped.
+		fx.Invoke(func(lc fx.Lifecycle, tracerProvider *sdktrace.TracerProvider) {
+			lc.Append(fx.Hook{
+				OnStop: func(ctx context.Context) error {
+					return tracerProvider.Shutdown(ctx)
+				},
+			})
+		}),
 		fx.Invoke(func(lc fx.Lifecycle, server *server.Server, provider *sdk.MeterProvider, ent *ent.Client, requestSvc *biz.RequestService) {
 			lc.Append(fx.Hook{
 				OnStart: func(ctx context.Context) error {
