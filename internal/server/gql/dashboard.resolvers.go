@@ -91,6 +91,13 @@ func (r *queryResolver) DashboardOverview(ctx context.Context) (*DashboardOvervi
 func (r *queryResolver) RequestStats(ctx context.Context) (*RequestStats, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	// countUsageLogsByCalendarPeriods runs a raw SQL aggregation through driver.DB(), which
+	// bypasses the Ent privacy decision set by WithScopeDecision. Enforce the scope
+	// explicitly so a principal without read_dashboard cannot read installation-wide counts.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
+	}
+
 	// Initialize response with defaults to handle partial failures gracefully
 	stats := &RequestStats{
 		RequestsToday:     0,
