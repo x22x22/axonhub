@@ -976,16 +976,22 @@ func (s *RequestService) ClearStaleProcessingOnStartup(ctx context.Context) erro
 }
 
 // UpdateRequestChannelID updates request with channel ID after channel selection.
-// It only persists the channel that the attempt actually used; conversation affinity is
-// updated separately by RememberSelectedChannel so a retry does not move the affinity
-// target.
+// It persists the channel that the attempt actually used and keeps the last-channel cache
+// following it: the adaptive balancer reads that cache through TraceAwareStrategy when
+// affinity is disabled or misses, and it must point at the channel that really served the
+// turn, not at the one the first attempt aimed for.
 func (s *RequestService) UpdateRequestChannelID(ctx context.Context, requestID int, channelID int) error {
 	client := s.entFromContext(ctx)
 
-	if _, err := client.Request.UpdateOneID(requestID).
+	request, err := client.Request.UpdateOneID(requestID).
 		SetChannelID(channelID).
-		Save(ctx); err != nil {
+		Save(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to update request channel ID: %w", err)
+	}
+
+	if request.TraceID != 0 {
+		s.setLastSuccessfulChannelID(ctx, request.TraceID, channelID)
 	}
 
 	return nil
@@ -999,13 +1005,15 @@ func (s *RequestService) UpdateRequestChannelID(ctx context.Context, requestID i
 // conversation onto a fallback channel with a cold prompt cache, and every later turn pays
 // a full prefill of the conversation prefix. On prod2 (2026-10-26) this follow-the-retry
 // behaviour accounted for 449 of 546 channel switches within five minutes.
+//
+// The last-channel cache is deliberately not touched here: UpdateRequestChannelID keeps it
+// on the channel that actually ran each attempt.
 func (s *RequestService) RememberSelectedChannel(ctx context.Context, traceID, channelID int, firstAttempt bool) {
 	if !firstAttempt || traceID == 0 || channelID == 0 {
 		return
 	}
 
 	s.setPreviousChannelCache(ctx, buildPreviousTraceChannelCacheKey(traceID), channelID)
-	s.setLastSuccessfulChannelID(ctx, traceID, channelID)
 
 	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil && trace.ID == traceID && trace.ThreadID != 0 {
 		s.setPreviousChannelCache(ctx, buildPreviousThreadChannelCacheKey(trace.ThreadID), channelID)

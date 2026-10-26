@@ -126,3 +126,18 @@ func TestRememberSelectedChannelIgnoresZeroValues(t *testing.T) {
 		t.Fatalf("previous channel = %d, want 0 for a zero channel id", got)
 	}
 }
+
+// The last-channel cache feeds TraceAwareStrategy when affinity is disabled or misses, so
+// it must follow the channel that actually ran each attempt (UpdateRequestChannelID owns
+// it). RememberSelectedChannel must not touch it, otherwise a retry that succeeded on
+// channel B would leave the adaptive balancer boosting channel A.
+func TestRememberSelectedChannelDoesNotTouchLastChannelCache(t *testing.T) {
+	svc := newPreviousChannelTestService(t, defaultPreviousChannelTTL)
+	ctx := context.Background()
+
+	svc.RememberSelectedChannel(ctx, 5, 1005, true)
+
+	if got, err := svc.channelCache.Get(ctx, buildLastChannelCacheKey(5)); err == nil && got != 0 {
+		t.Fatalf("last-channel cache = %d, want it to stay untouched by RememberSelectedChannel", got)
+	}
+}
