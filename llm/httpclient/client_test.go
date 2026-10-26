@@ -701,3 +701,16 @@ func TestBuildHttpRequest_UserAgentPassThrough(t *testing.T) {
 		})
 	}
 }
+
+// The keep-alive pool must not be limited to the Go default of 2 idle connections per
+// host: the gateway opens many concurrent streams to the same upstream host, and a tiny
+// per-host pool forces a TCP+TLS handshake (extra RTT on first token) for almost every
+// burst. 100 matches MaxIdleConns used by the same transport.
+func TestHttpClientTransportIdleConnsPerHost(t *testing.T) {
+	hc := NewHttpClientWithProxy(nil)
+
+	transport, ok := hc.GetNativeClient().Transport.(*http.Transport)
+	require.True(t, ok)
+
+	require.Equal(t, 100, transport.MaxIdleConnsPerHost)
+}
