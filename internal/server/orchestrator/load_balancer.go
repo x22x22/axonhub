@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -182,6 +183,27 @@ func (lb *LoadBalancer) ScoreCandidate(ctx context.Context, model string, stream
 	}
 
 	return total
+}
+
+// ChannelErrorScore returns the ErrorAware score of a channel (0..maxScore). A channel that
+// keeps failing scores low because ErrorAware subtracts for every consecutive failure; the
+// counter is reset by the next success, so an intermittent 429 does not accumulate.
+//
+// The affinity pin uses it as a health gate: a conversation must not stay trapped on a
+// channel that fails every attempt. When the strategy set has no ErrorAware strategy
+// (failover, circuit breaker) the pin is not restricted and +Inf is returned.
+func (lb *LoadBalancer) ChannelErrorScore(ctx context.Context, channel *biz.Channel) float64 {
+	if lb == nil || channel == nil {
+		return math.Inf(1)
+	}
+
+	for _, strategy := range lb.strategies {
+		if errorAware, ok := strategy.(*ErrorAwareStrategy); ok {
+			return errorAware.Score(ctx, channel)
+		}
+	}
+
+	return math.Inf(1)
 }
 
 // sortProduction is the fast path without debug overhead.

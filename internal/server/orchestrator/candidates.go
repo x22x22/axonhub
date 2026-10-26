@@ -554,9 +554,20 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 // channels whose concurrency budget is exhausted.
 const stickyCandidateMinScore = -1000.0
 
+// stickyCandidateMinErrorScore is the ErrorAware health floor for a pinned channel.
+// ErrorAware starts at 200 and subtracts 40 (base) plus 30 per consecutive failure with a
+// five minute decay: 1 failure = 130, 2 = 100, 3 = 70. A success resets the counter, so an
+// intermittent 429 followed by a success keeps the pin (prompt cache stays warm), while a
+// channel that keeps failing yields it to a healthy one.
+const stickyCandidateMinErrorScore = 120.0
+
 func (s *LoadBalancedSelector) isStickyCandidateUsable(ctx context.Context, req *llm.Request, candidate *ChannelModelsCandidate) bool {
 	if s.loadBalancer == nil {
 		return true
+	}
+
+	if s.loadBalancer.ChannelErrorScore(ctx, candidate.Channel) < stickyCandidateMinErrorScore {
+		return false
 	}
 
 	useStream := req.Stream != nil && *req.Stream
