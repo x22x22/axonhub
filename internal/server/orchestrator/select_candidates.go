@@ -72,6 +72,7 @@ func selectCandidates(inbound *PersistentInboundTransformer) pipeline.Middleware
 					inbound.state.LoadBalancer,
 					inbound.state.RetryPolicyProvider,
 					inbound.state.RequestService,
+					WithStickyBypassRecorder(inbound.state),
 				)
 			} else {
 				selector = WithLoadBalancedSelector(selector, inbound.state.LoadBalancer, inbound.state.RetryPolicyProvider)

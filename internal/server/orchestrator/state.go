@@ -45,6 +45,12 @@ type PersistenceState struct {
 	CurrentCandidate *ChannelModelsCandidate
 	// CurrentModelIndex is the current model index in CurrentCandidate.Models
 	CurrentModelIndex int
+	// StickyAffinityBypassed is set when the conversation's affinity target was skipped
+	// for this request because it is temporarily unavailable (for example cooling down
+	// after a 429). The fallback channel that runs this request must then not become the
+	// new affinity target: a transient cooldown must not permanently migrate the
+	// conversation away from a channel that still holds the warm prompt cache.
+	StickyAffinityBypassed bool
 
 	// Perf is the performance record for the current request.
 	Perf *biz.PerformanceRecord
@@ -74,4 +80,15 @@ type PersistenceState struct {
 	// captureRawProviderStream. Must be called in PrepareForRetry and NextChannel so the
 	// abandoned goroutine exits promptly and releases its upstream HTTP connection.
 	RawStreamCancel context.CancelFunc
+}
+
+// RecordStickyAffinityBypass implements StickyBypassRecorder. The selector calls it when the
+// conversation's affinity target is temporarily unusable, so the fallback channel that runs
+// this request is not recorded as the new affinity target.
+func (s *PersistenceState) RecordStickyAffinityBypass() {
+	if s == nil {
+		return
+	}
+
+	s.StickyAffinityBypassed = true
 }

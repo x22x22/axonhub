@@ -462,6 +462,9 @@ type LoadBalancedSelector struct {
 	// stats counts why affinity did or did not apply, so it can be evaluated from metrics
 	// instead of reverse engineering channel switches from the gateway database.
 	stats *stickyStats
+	// bypassRecorder is notified when the affinity target is skipped for a temporary
+	// reason, so the caller does not replace the affinity target with the fallback channel.
+	bypassRecorder StickyBypassRecorder
 }
 
 // WithLoadBalancedSelector creates a selector that applies load balancing to sort candidates.
@@ -474,6 +477,25 @@ func WithLoadBalancedSelector(wrapped CandidateSelector, loadBalancer *LoadBalan
 	}
 }
 
+// StickyBypassRecorder is notified when the conversation's affinity target is skipped
+// because it is temporarily unavailable (cooling down after a 429, saturated, or scoring
+// below the usability floor). The caller must not treat the fallback channel as a new
+// affinity target in that case: a transient cooldown must not permanently migrate the
+// conversation away from a channel that still holds the warm prompt cache.
+type StickyBypassRecorder interface {
+	RecordStickyAffinityBypass()
+}
+
+// LoadBalancedSelectorOption customises the sticky load balanced selector.
+type LoadBalancedSelectorOption func(*LoadBalancedSelector)
+
+// WithStickyBypassRecorder reports temporary affinity bypasses to the caller.
+func WithStickyBypassRecorder(recorder StickyBypassRecorder) LoadBalancedSelectorOption {
+	return func(s *LoadBalancedSelector) {
+		s.bypassRecorder = recorder
+	}
+}
+
 // WithTraceStickyLoadBalancedSelector creates a selector that prefers the channel which
 // served the previous turn of the same trace (or thread) before applying load balancing.
 // The affinity is resolved once per request and pinned as the first candidate, so a large
@@ -483,14 +505,21 @@ func WithTraceStickyLoadBalancedSelector(
 	loadBalancer *LoadBalancer,
 	policy RetryPolicyProvider,
 	previousChannelProvider PreviousChannelProvider,
+	opts ...LoadBalancedSelectorOption,
 ) *LoadBalancedSelector {
-	return &LoadBalancedSelector{
+	selector := &LoadBalancedSelector{
 		wrapped:                 wrapped,
 		loadBalancer:            loadBalancer,
 		policy:                  policy,
 		previousChannelProvider: previousChannelProvider,
 		stats:                   &stickyStats{},
 	}
+
+	for _, opt := range opts {
+		opt(selector)
+	}
+
+	return selector
 }
 
 func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]*ChannelModelsCandidate, error) {
@@ -539,6 +568,13 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 				}
 
 				s.stats.record(ctx, StickyRejectedUnavailable)
+
+				// The pinned channel is only temporarily unavailable: tell the caller so the
+				// fallback channel that runs this request is not recorded as the new
+				// affinity target.
+				if s.bypassRecorder != nil {
+					s.bypassRecorder.RecordStickyAffinityBypass()
+				}
 			}
 		} else {
 			s.stats.record(ctx, outcome)
