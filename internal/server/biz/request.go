@@ -33,7 +33,16 @@ type RequestService struct {
 	DataStorageService *DataStorageService
 	LiveStreamRegistry *LiveStreamRegistry
 	channelCache       xcache.Cache[int]
+
+	// previousChannelTTL is how long a conversation keeps its channel affinity. It is a
+	// field so tests can drive the sliding-expiration behaviour with a short TTL.
+	previousChannelTTL time.Duration
 }
+
+// defaultPreviousChannelTTL is how long a conversation keeps its upstream prompt cache.
+// A 30 minute entry was too short: on prod2 (2026-10-26) 148 channel switches per day came
+// from it expiring in the middle of a conversation.
+const defaultPreviousChannelTTL = 2 * time.Hour
 
 // NewRequestService creates a new RequestService.
 func NewRequestService(ent *ent.Client, systemService *SystemService, usageLogService *UsageLogService, dataStorageService *DataStorageService, liveStreamRegistry *LiveStreamRegistry) *RequestService {
@@ -967,49 +976,40 @@ func (s *RequestService) ClearStaleProcessingOnStartup(ctx context.Context) erro
 }
 
 // UpdateRequestChannelID updates request with channel ID after channel selection.
+// It only persists the channel that the attempt actually used; conversation affinity is
+// updated separately by RememberSelectedChannel so a retry does not move the affinity
+// target.
 func (s *RequestService) UpdateRequestChannelID(ctx context.Context, requestID int, channelID int) error {
 	client := s.entFromContext(ctx)
 
-	request, err := client.Request.UpdateOneID(requestID).
+	if _, err := client.Request.UpdateOneID(requestID).
 		SetChannelID(channelID).
-		Save(ctx)
-	if err != nil {
+		Save(ctx); err != nil {
 		return fmt.Errorf("failed to update request channel ID: %w", err)
 	}
-
-	// Reset channel cache for this trace when request completes
-	if request.TraceID != 0 {
-		s.setLastSuccessfulChannelID(ctx, request.TraceID, channelID)
-	}
-
-	// Remember the channel as soon as it is selected, so the next turn of the same
-	// conversation can pin it. Waiting for the request to complete is too late: an agent
-	// client sends the next turn immediately after the previous response finishes.
-	s.cachePreviousChannelForRequest(ctx, request)
 
 	return nil
 }
 
-// cachePreviousChannelForRequest records the channel that was just selected for the
-// request's trace (and its thread, when known). The entry lives in the previous-channel
-// cache for 30 minutes, which is how long a conversation keeps its upstream prompt cache.
-func (s *RequestService) cachePreviousChannelForRequest(ctx context.Context, req *ent.Request) {
-	if req == nil || req.ChannelID == 0 || req.TraceID == 0 {
+// RememberSelectedChannel records the channel of a conversation so the next turn can pin
+// it and keep the upstream prompt cache warm.
+//
+// Only the first attempt of a request may move the affinity target. A retry (same channel
+// or channel switch) must not: otherwise one transient 429 permanently moves the
+// conversation onto a fallback channel with a cold prompt cache, and every later turn pays
+// a full prefill of the conversation prefix. On prod2 (2026-10-26) this follow-the-retry
+// behaviour accounted for 449 of 546 channel switches within five minutes.
+func (s *RequestService) RememberSelectedChannel(ctx context.Context, traceID, channelID int, firstAttempt bool) {
+	if !firstAttempt || traceID == 0 || channelID == 0 {
 		return
 	}
 
-	s.setPreviousChannelCache(ctx, buildPreviousTraceChannelCacheKey(req.TraceID), req.ChannelID)
+	s.setPreviousChannelCache(ctx, buildPreviousTraceChannelCacheKey(traceID), channelID)
+	s.setLastSuccessfulChannelID(ctx, traceID, channelID)
 
-	threadID := 0
-	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil && trace.ID == req.TraceID {
-		threadID = trace.ThreadID
+	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil && trace.ID == traceID && trace.ThreadID != 0 {
+		s.setPreviousChannelCache(ctx, buildPreviousThreadChannelCacheKey(trace.ThreadID), channelID)
 	}
-
-	if threadID == 0 {
-		return
-	}
-
-	s.setPreviousChannelCache(ctx, buildPreviousThreadChannelCacheKey(threadID), req.ChannelID)
 }
 
 // GetPreviousChannelID returns the channel that was last selected for a trace, without
@@ -1017,10 +1017,16 @@ func (s *RequestService) cachePreviousChannelForRequest(ctx context.Context, req
 // affinity is reset. Keeping it cache-only means the channel selector can ask once per
 // request without adding database load on the hot path.
 func (s *RequestService) GetPreviousChannelID(ctx context.Context, traceID int) (int, error) {
-	channelID, err := s.channelCache.Get(ctx, buildPreviousTraceChannelCacheKey(traceID))
+	cacheKey := buildPreviousTraceChannelCacheKey(traceID)
+
+	channelID, err := s.channelCache.Get(ctx, cacheKey)
 	if err != nil {
 		return 0, nil
 	}
+
+	// Sliding expiration: an active conversation keeps its affinity even when its last
+	// request is older than one TTL window.
+	s.setPreviousChannelCache(ctx, cacheKey, channelID)
 
 	return channelID, nil
 }
@@ -1028,16 +1034,28 @@ func (s *RequestService) GetPreviousChannelID(ctx context.Context, traceID int) 
 // GetPreviousChannelIDByThread is the thread-level counterpart of GetPreviousChannelID,
 // used when the trace has no recorded channel yet (for example after a tracing reset).
 func (s *RequestService) GetPreviousChannelIDByThread(ctx context.Context, threadID int) (int, error) {
-	channelID, err := s.channelCache.Get(ctx, buildPreviousThreadChannelCacheKey(threadID))
+	cacheKey := buildPreviousThreadChannelCacheKey(threadID)
+
+	channelID, err := s.channelCache.Get(ctx, cacheKey)
 	if err != nil {
 		return 0, nil
 	}
+
+	s.setPreviousChannelCache(ctx, cacheKey, channelID)
 
 	return channelID, nil
 }
 
 func (s *RequestService) setPreviousChannelCache(ctx context.Context, cacheKey string, channelID int) {
-	_ = s.channelCache.Set(ctx, cacheKey, channelID, store.WithExpiration(30*time.Minute))
+	_ = s.channelCache.Set(ctx, cacheKey, channelID, store.WithExpiration(s.previousChannelTTLOrDefault()))
+}
+
+func (s *RequestService) previousChannelTTLOrDefault() time.Duration {
+	if s.previousChannelTTL > 0 {
+		return s.previousChannelTTL
+	}
+
+	return defaultPreviousChannelTTL
 }
 
 func buildPreviousTraceChannelCacheKey(traceID int) string {

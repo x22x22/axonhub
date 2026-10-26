@@ -99,6 +99,11 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawRequest(ctx context.Con
 		if err != nil {
 			return nil, err
 		}
+
+		// Only the first attempt may move the conversation affinity target: a retry that
+		// fails over to another channel must not drag the whole conversation with it.
+		state.RequestService.RememberSelectedChannel(ctx, state.Request.TraceID, channel.ID, state.CurrentCandidateIndex == 0)
+
 		// Update the in-memory state to prevent duplicate updates and ensure consistency
 		state.Request.ChannelID = channel.ID
 	}
