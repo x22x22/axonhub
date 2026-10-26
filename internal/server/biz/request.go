@@ -153,11 +153,6 @@ func (s *RequestService) CreateRequest(
 		if httpRequest != nil && len(httpRequest.Headers) > 0 {
 			requestHeadersBytes, _ = xjson.Marshal(httpclient.MaskSensitiveHeaders(httpRequest.Headers))
 		}
-
-		// Tool outputs can embed raw binary content, which is serialized as the JSON
-		// escape "\u0000". PostgreSQL jsonb rejects such documents (SQLSTATE 22P05),
-		// which used to make the body fail to persist and fall back to a placeholder.
-		requestBodyBytes = xjson.SanitizeNULStringEscapes(requestBodyBytes)
 	} // else keep nil -> stored as JSON null
 
 	isStream := false
@@ -192,8 +187,11 @@ func (s *RequestService) CreateRequest(
 		// Set empty JSON for database, actual data will be in external storage
 		mut = mut.SetRequestBody([]byte("{}"))
 	} else {
-		// Store in database
-		mut = mut.SetRequestBody(requestBodyBytes)
+		// Store in database. Tool outputs can embed raw binary content, which is serialized
+		// as the JSON escape "\u0000"; PostgreSQL jsonb rejects such documents (SQLSTATE
+		// 22P05), so the NUL escapes are stripped for the database copy only. External
+		// storage has no jsonb restriction and keeps the original bytes.
+		mut = mut.SetRequestBody(xjson.SanitizeNULStringEscapes(requestBodyBytes))
 	}
 
 	if dataStorage != nil {
@@ -278,10 +276,6 @@ func (s *RequestService) CreateRequestExecution(
 		if len(channelRequest.Headers) > 0 {
 			requestHeadersBytes, _ = xjson.Marshal(httpclient.MaskSensitiveHeaders(channelRequest.Headers))
 		}
-
-		// See CreateRequest: strip NUL escapes so PostgreSQL jsonb can persist the body
-		// instead of rejecting it with SQLSTATE 22P05 and falling back to a placeholder.
-		requestBodyBytes = xjson.SanitizeNULStringEscapes(requestBodyBytes)
 	}
 
 	client := s.entFromContext(ctx)
@@ -306,8 +300,9 @@ func (s *RequestService) CreateRequestExecution(
 		// Set empty JSON for database, actual data will be in external storage
 		requestBodyForDB = []byte("{}")
 	} else {
-		// Store in database
-		requestBodyForDB = requestBodyBytes
+		// Store in database. See CreateRequest: NUL escapes are stripped for the jsonb copy
+		// only, external storage keeps the original bytes.
+		requestBodyForDB = xjson.SanitizeNULStringEscapes(requestBodyBytes)
 	}
 
 	mut := client.RequestExecution.Create().
