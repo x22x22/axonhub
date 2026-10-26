@@ -714,3 +714,27 @@ func TestHttpClientTransportIdleConnsPerHost(t *testing.T) {
 
 	require.Equal(t, 100, transport.MaxIdleConnsPerHost)
 }
+
+// NewHttpClient is the constructor behind the default channel client: the gateway injects
+// it with disable_ssl_verify, and channels without a custom proxy reuse it directly.
+// A nil Transport would fall back to http.DefaultTransport, which caps idle connections
+// per host at 2, so both variants must carry the raised limit.
+func TestHttpClientDefaultTransportPoolLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []ClientOption
+	}{
+		{name: "default", opts: nil},
+		{name: "insecure skip verify", opts: []ClientOption{WithInsecureSkipVerify(true)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hc := NewHttpClient(tt.opts...)
+
+			transport, ok := hc.GetNativeClient().Transport.(*http.Transport)
+			require.True(t, ok, "NewHttpClient must install its own transport")
+			require.Equal(t, 100, transport.MaxIdleConnsPerHost)
+		})
+	}
+}
