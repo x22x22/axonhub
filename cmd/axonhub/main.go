@@ -25,6 +25,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/metrics"
+	"github.com/looplj/axonhub/internal/trace"
 	"github.com/looplj/axonhub/internal/server"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/internal/server/middleware"
@@ -74,6 +75,7 @@ func startServer() {
 		}),
 		conf.Module,
 		fx.Provide(metrics.NewProvider),
+		fx.Provide(trace.NewProvider),
 		fx.Invoke(func(lc fx.Lifecycle, cfg server.Config) {
 			lc.Append(fx.Hook{
 				OnStart: func(ctx context.Context) error {
