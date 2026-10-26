@@ -26,6 +26,11 @@ type _Metrics struct {
 	ChatTokenCount      metric.Int64Counter
 	ChatSuccessCount    metric.Int64Counter
 	ChatFailureCount    metric.Int64Counter
+
+	// Conversation affinity metrics: why a request did or did not keep the channel of the
+	// previous turn. Without this the only way to evaluate affinity was to reverse
+	// engineer the distinct channel count per session from the gateway database.
+	ChatStickyOutcome metric.Int64Counter
 }
 
 var Metrics *_Metrics
@@ -137,6 +142,17 @@ func SetupMetrics(provider *sdk.MeterProvider, name string) error {
 
 	Metrics.ChatFailureCount = chatFailureCount
 
+	stickyOutcome, err := meter.Int64Counter(
+		"chat_sticky_outcome_count",
+		metric.WithDescription("Conversation affinity outcome of channel selection"),
+		metric.WithUnit("requests"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create chat_sticky_outcome_count counter: %w", err)
+	}
+
+	Metrics.ChatStickyOutcome = stickyOutcome
+
 	return nil
 }
 
@@ -178,4 +194,10 @@ func (sm *_Metrics) RecordChatRequest(ctx context.Context, channelID, channelNam
 	} else {
 		sm.ChatFailureCount.Add(ctx, 1, metric.WithAttributes(labels...))
 	}
+}
+
+// RecordStickyOutcome records why a request did or did not keep the channel of the
+// previous turn: hit, miss_no_cache, miss_not_in_candidates or rejected_unavailable.
+func (sm *_Metrics) RecordStickyOutcome(ctx context.Context, outcome string) {
+	sm.ChatStickyOutcome.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 }

@@ -459,6 +459,9 @@ type LoadBalancedSelector struct {
 	// the same conversation. Staying on one channel keeps the upstream prompt cache warm;
 	// a switch forces a full prefill of the whole conversation prefix on every turn.
 	previousChannelProvider PreviousChannelProvider
+	// stats counts why affinity did or did not apply, so it can be evaluated from metrics
+	// instead of reverse engineering channel switches from the gateway database.
+	stats *stickyStats
 }
 
 // WithLoadBalancedSelector creates a selector that applies load balancing to sort candidates.
@@ -486,6 +489,7 @@ func WithTraceStickyLoadBalancedSelector(
 		loadBalancer:            loadBalancer,
 		policy:                  policy,
 		previousChannelProvider: previousChannelProvider,
+		stats:                   &stickyStats{},
 	}
 }
 
@@ -511,12 +515,16 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 	// configurable (RetryPolicy.TraceStickyMode): "disabled" balances every request
 	// independently, which is what an operator wants when channels must be spread evenly.
 	if s.previousChannelProvider != nil && biz.NormalizeTraceStickyMode(retryPolicy.TraceStickyMode) == biz.TraceStickyPreferPreviousChannel {
-		if stickyChannelID, ok := s.resolvePreviousChannelID(ctx, candidates); ok {
+		stickyChannelID, outcome := s.resolvePreviousChannelID(ctx, candidates)
+
+		if outcome == StickyHit {
 			if pinned, remaining := extractStickyCandidate(candidates, stickyChannelID); pinned != nil {
 				// Pinning must not override availability: a channel that is cooling down
 				// after a 429 (or saturated) is scored far below every healthy channel, in
 				// which case affinity yields and normal load balancing takes over.
 				if s.isStickyCandidateUsable(ctx, req, pinned) {
+					s.stats.record(ctx, StickyHit)
+
 					fallback := s.rankCandidates(ctx, req, remaining, requiredCount-1)
 
 					if log.DebugEnabled(ctx) {
@@ -529,7 +537,11 @@ func (s *LoadBalancedSelector) Select(ctx context.Context, req *llm.Request) ([]
 
 					return append([]*ChannelModelsCandidate{pinned}, fallback...), nil
 				}
+
+				s.stats.record(ctx, StickyRejectedUnavailable)
 			}
+		} else {
+			s.stats.record(ctx, outcome)
 		}
 	}
 
@@ -555,7 +567,10 @@ func (s *LoadBalancedSelector) isStickyCandidateUsable(ctx context.Context, req 
 // resolvePreviousChannelID returns the channel used by the previous turn, preferring the
 // trace level mapping and falling back to the thread level one. A channel that is no
 // longer among the candidates (archived, filtered by a profile, unavailable) is ignored.
-func (s *LoadBalancedSelector) resolvePreviousChannelID(ctx context.Context, candidates []*ChannelModelsCandidate) (int, bool) {
+//
+// The returned outcome tells why affinity did not apply, so the sticky hit rate can be
+// observed without reverse engineering channel switches from the database.
+func (s *LoadBalancedSelector) resolvePreviousChannelID(ctx context.Context, candidates []*ChannelModelsCandidate) (int, StickyOutcome) {
 	hasCandidate := func(channelID int) bool {
 		if channelID == 0 {
 			return false
@@ -570,9 +585,15 @@ func (s *LoadBalancedSelector) resolvePreviousChannelID(ctx context.Context, can
 		return false
 	}
 
+	sawPrevious := false
+
 	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil {
-		if channelID, err := s.previousChannelProvider.GetPreviousChannelID(ctx, trace.ID); err == nil && hasCandidate(channelID) {
-			return channelID, true
+		if channelID, err := s.previousChannelProvider.GetPreviousChannelID(ctx, trace.ID); err == nil && channelID != 0 {
+			sawPrevious = true
+
+			if hasCandidate(channelID) {
+				return channelID, StickyHit
+			}
 		}
 	}
 
@@ -583,15 +604,21 @@ func (s *LoadBalancedSelector) resolvePreviousChannelID(ctx context.Context, can
 		threadID = trace.ThreadID
 	}
 
-	if threadID == 0 {
-		return 0, false
+	if threadID != 0 {
+		if channelID, err := s.previousChannelProvider.GetPreviousChannelIDByThread(ctx, threadID); err == nil && channelID != 0 {
+			sawPrevious = true
+
+			if hasCandidate(channelID) {
+				return channelID, StickyHit
+			}
+		}
 	}
 
-	if channelID, err := s.previousChannelProvider.GetPreviousChannelIDByThread(ctx, threadID); err == nil && hasCandidate(channelID) {
-		return channelID, true
+	if sawPrevious {
+		return 0, StickyMissNotCandidate
 	}
 
-	return 0, false
+	return 0, StickyMissNoCache
 }
 
 // extractStickyCandidate removes one instance of the pinned channel from the candidate
