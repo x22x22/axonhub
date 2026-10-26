@@ -52,7 +52,11 @@ END $$;`
 	}
 
 	// When the canonical index is already in place, drop the redundant legacy one.
-	if _, err := sqlDB.ExecContext(ctx, "DROP INDEX IF EXISTS public."+legacyRequestStatusIndex); err != nil {
+	// CONCURRENTLY is required here: an ordinary DROP INDEX takes an ACCESS EXCLUSIVE lock
+	// on requests, which blocks reads and writes of the other gateway replicas during a
+	// rolling deployment (and while waiting behind existing transactions). The statement
+	// runs outside any transaction, which CONCURRENTLY requires.
+	if _, err := sqlDB.ExecContext(ctx, "DROP INDEX CONCURRENTLY IF EXISTS public."+legacyRequestStatusIndex); err != nil {
 		log.Warn(ctx, "failed to drop redundant legacy request status index, continuing",
 			log.String("legacy_index", legacyRequestStatusIndex), log.Cause(err))
 	}

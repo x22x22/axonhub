@@ -49,6 +49,7 @@ func TestCountUsageLogsByCalendarPeriods_MatchesPerPeriodCounts(t *testing.T) {
 		require.NoError(t, err)
 	}
 
+	//nolint:exhaustruct // the aggregation only needs the ent client
 	resolver := &queryResolver{Resolver: &Resolver{client: client}}
 
 	got, err := resolver.countUsageLogsByCalendarPeriods(ctx, period)
