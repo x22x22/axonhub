@@ -170,7 +170,31 @@ const (
 
 	// LoadBalancerStrategyCircuitBreaker is a dynamic load balancer strategy that monitors the health of channels and fails over to a backup channel when the primary channel is unhealthy.
 	LoadBalancerStrategyCircuitBreaker = "circuit-breaker"
+
+	// TraceStickyPreferPreviousChannel keeps a conversation on the channel that served its
+	// previous turn. This preserves the upstream prompt cache, which is what makes a
+	// multi-turn agent conversation cheap after the first turn.
+	TraceStickyPreferPreviousChannel = "prefer_previous_channel"
+
+	// TraceStickyDisabled turns conversation affinity off; every request is balanced
+	// independently. Useful when channels must be spread evenly (for example per-account
+	// quota rotation).
+	TraceStickyDisabled = "disabled"
 )
+
+// NormalizeTraceStickyMode maps a configured value to a supported mode. Empty and unknown
+// values fall back to the default (prefer the previous channel), so a typo never silently
+// disables affinity.
+func NormalizeTraceStickyMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case TraceStickyPreferPreviousChannel, "prefer-previous-channel", "prefer_previous", "sticky":
+		return TraceStickyPreferPreviousChannel
+	case TraceStickyDisabled, "off", "none", "disable":
+		return TraceStickyDisabled
+	default:
+		return TraceStickyPreferPreviousChannel
+	}
+}
 
 // RetryPolicy represents the retry policy configuration.
 type RetryPolicy struct {
@@ -195,6 +219,11 @@ type RetryPolicy struct {
 	// When enabled, the pipeline pre-reads stream events to check if the response
 	// contains meaningful content, and marks empty responses as failed attempts for retry handling.
 	EmptyResponseDetection bool `json:"empty_response_detection"`
+
+	// TraceStickyMode controls conversation affinity: whether a conversation is pinned to
+	// the channel that served its previous turn.
+	// Supported values: "prefer_previous_channel" (default), "disabled".
+	TraceStickyMode string `json:"trace_sticky_mode"`
 }
 
 type AutoDisableChannel struct {
@@ -845,6 +874,8 @@ func normalizeRetryPolicy(policy *RetryPolicy) {
 	if policy.AutoDisableChannel.Statuses == nil {
 		policy.AutoDisableChannel.Statuses = []AutoDisableChannelStatus{}
 	}
+
+	policy.TraceStickyMode = NormalizeTraceStickyMode(policy.TraceStickyMode)
 }
 
 func normalizeWebhookNotifierConfig(cfg *WebhookNotifierConfig) {

@@ -701,3 +701,40 @@ func TestBuildHttpRequest_UserAgentPassThrough(t *testing.T) {
 		})
 	}
 }
+
+// The keep-alive pool must not be limited to the Go default of 2 idle connections per
+// host: the gateway opens many concurrent streams to the same upstream host, and a tiny
+// per-host pool forces a TCP+TLS handshake (extra RTT on first token) for almost every
+// burst. 100 matches MaxIdleConns used by the same transport.
+func TestHttpClientTransportIdleConnsPerHost(t *testing.T) {
+	hc := NewHttpClientWithProxy(nil)
+
+	transport, ok := hc.GetNativeClient().Transport.(*http.Transport)
+	require.True(t, ok)
+
+	require.Equal(t, 100, transport.MaxIdleConnsPerHost)
+}
+
+// NewHttpClient is the constructor behind the default channel client: the gateway injects
+// it with disable_ssl_verify, and channels without a custom proxy reuse it directly.
+// A nil Transport would fall back to http.DefaultTransport, which caps idle connections
+// per host at 2, so both variants must carry the raised limit.
+func TestHttpClientDefaultTransportPoolLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []ClientOption
+	}{
+		{name: "default", opts: nil},
+		{name: "insecure skip verify", opts: []ClientOption{WithInsecureSkipVerify(true)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hc := NewHttpClient(tt.opts...)
+
+			transport, ok := hc.GetNativeClient().Transport.(*http.Transport)
+			require.True(t, ok, "NewHttpClient must install its own transport")
+			require.Equal(t, 100, transport.MaxIdleConnsPerHost)
+		})
+	}
+}

@@ -99,6 +99,15 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawRequest(ctx context.Con
 		if err != nil {
 			return nil, err
 		}
+
+		// Only the first attempt may move the conversation affinity target: a retry that
+		// fails over to another channel must not drag the whole conversation with it. A
+		// temporary bypass (the pinned channel is cooling down after a 429) must not replace
+		// the target either, otherwise a transient cooldown permanently migrates the
+		// conversation away from its warm prompt cache.
+		firstAttempt := state.CurrentCandidateIndex == 0 && !state.StickyAffinityBypassed
+		state.RequestService.RememberSelectedChannel(ctx, state.Request.TraceID, channel.ID, firstAttempt)
+
 		// Update the in-memory state to prevent duplicate updates and ensure consistency
 		state.Request.ChannelID = channel.ID
 	}

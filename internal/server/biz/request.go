@@ -33,7 +33,16 @@ type RequestService struct {
 	DataStorageService *DataStorageService
 	LiveStreamRegistry *LiveStreamRegistry
 	channelCache       xcache.Cache[int]
+
+	// previousChannelTTL is how long a conversation keeps its channel affinity. It is a
+	// field so tests can drive the sliding-expiration behaviour with a short TTL.
+	previousChannelTTL time.Duration
 }
+
+// defaultPreviousChannelTTL is how long a conversation keeps its upstream prompt cache.
+// A 30 minute entry was too short: on prod2 (2026-10-26) 148 channel switches per day came
+// from it expiring in the middle of a conversation.
+const defaultPreviousChannelTTL = 2 * time.Hour
 
 // NewRequestService creates a new RequestService.
 func NewRequestService(ent *ent.Client, systemService *SystemService, usageLogService *UsageLogService, dataStorageService *DataStorageService, liveStreamRegistry *LiveStreamRegistry) *RequestService {
@@ -153,6 +162,11 @@ func (s *RequestService) CreateRequest(
 		if httpRequest != nil && len(httpRequest.Headers) > 0 {
 			requestHeadersBytes, _ = xjson.Marshal(httpclient.MaskSensitiveHeaders(httpRequest.Headers))
 		}
+
+		// Tool outputs can embed raw binary content, which is serialized as the JSON
+		// escape "\u0000". PostgreSQL jsonb rejects such documents (SQLSTATE 22P05),
+		// which used to make the body fail to persist and fall back to a placeholder.
+		requestBodyBytes = xjson.SanitizeNULStringEscapes(requestBodyBytes)
 	} // else keep nil -> stored as JSON null
 
 	isStream := false
@@ -273,6 +287,10 @@ func (s *RequestService) CreateRequestExecution(
 		if len(channelRequest.Headers) > 0 {
 			requestHeadersBytes, _ = xjson.Marshal(httpclient.MaskSensitiveHeaders(channelRequest.Headers))
 		}
+
+		// See CreateRequest: strip NUL escapes so PostgreSQL jsonb can persist the body
+		// instead of rejecting it with SQLSTATE 22P05 and falling back to a placeholder.
+		requestBodyBytes = xjson.SanitizeNULStringEscapes(requestBodyBytes)
 	}
 
 	client := s.entFromContext(ctx)
@@ -958,6 +976,10 @@ func (s *RequestService) ClearStaleProcessingOnStartup(ctx context.Context) erro
 }
 
 // UpdateRequestChannelID updates request with channel ID after channel selection.
+// It persists the channel that the attempt actually used and keeps the last-channel cache
+// following it: the adaptive balancer reads that cache through TraceAwareStrategy when
+// affinity is disabled or misses, and it must point at the channel that really served the
+// turn, not at the one the first attempt aimed for.
 func (s *RequestService) UpdateRequestChannelID(ctx context.Context, requestID int, channelID int) error {
 	client := s.entFromContext(ctx)
 
@@ -968,12 +990,88 @@ func (s *RequestService) UpdateRequestChannelID(ctx context.Context, requestID i
 		return fmt.Errorf("failed to update request channel ID: %w", err)
 	}
 
-	// Reset channel cache for this trace when request completes
 	if request.TraceID != 0 {
 		s.setLastSuccessfulChannelID(ctx, request.TraceID, channelID)
 	}
 
 	return nil
+}
+
+// RememberSelectedChannel records the channel of a conversation so the next turn can pin
+// it and keep the upstream prompt cache warm.
+//
+// Only the first attempt of a request may move the affinity target. A retry (same channel
+// or channel switch) must not: otherwise one transient 429 permanently moves the
+// conversation onto a fallback channel with a cold prompt cache, and every later turn pays
+// a full prefill of the conversation prefix. On prod2 (2026-10-26) this follow-the-retry
+// behaviour accounted for 449 of 546 channel switches within five minutes.
+//
+// The last-channel cache is deliberately not touched here: UpdateRequestChannelID keeps it
+// on the channel that actually ran each attempt.
+func (s *RequestService) RememberSelectedChannel(ctx context.Context, traceID, channelID int, firstAttempt bool) {
+	if !firstAttempt || traceID == 0 || channelID == 0 {
+		return
+	}
+
+	s.setPreviousChannelCache(ctx, buildPreviousTraceChannelCacheKey(traceID), channelID)
+
+	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil && trace.ID == traceID && trace.ThreadID != 0 {
+		s.setPreviousChannelCache(ctx, buildPreviousThreadChannelCacheKey(trace.ThreadID), channelID)
+	}
+}
+
+// GetPreviousChannelID returns the channel that was last selected for a trace, without
+// falling back to the database. The cache is the source of truth: when it expires, trace
+// affinity is reset. Keeping it cache-only means the channel selector can ask once per
+// request without adding database load on the hot path.
+func (s *RequestService) GetPreviousChannelID(ctx context.Context, traceID int) (int, error) {
+	cacheKey := buildPreviousTraceChannelCacheKey(traceID)
+
+	channelID, err := s.channelCache.Get(ctx, cacheKey)
+	if err != nil {
+		return 0, nil
+	}
+
+	// Sliding expiration: an active conversation keeps its affinity even when its last
+	// request is older than one TTL window.
+	s.setPreviousChannelCache(ctx, cacheKey, channelID)
+
+	return channelID, nil
+}
+
+// GetPreviousChannelIDByThread is the thread-level counterpart of GetPreviousChannelID,
+// used when the trace has no recorded channel yet (for example after a tracing reset).
+func (s *RequestService) GetPreviousChannelIDByThread(ctx context.Context, threadID int) (int, error) {
+	cacheKey := buildPreviousThreadChannelCacheKey(threadID)
+
+	channelID, err := s.channelCache.Get(ctx, cacheKey)
+	if err != nil {
+		return 0, nil
+	}
+
+	s.setPreviousChannelCache(ctx, cacheKey, channelID)
+
+	return channelID, nil
+}
+
+func (s *RequestService) setPreviousChannelCache(ctx context.Context, cacheKey string, channelID int) {
+	_ = s.channelCache.Set(ctx, cacheKey, channelID, store.WithExpiration(s.previousChannelTTLOrDefault()))
+}
+
+func (s *RequestService) previousChannelTTLOrDefault() time.Duration {
+	if s.previousChannelTTL > 0 {
+		return s.previousChannelTTL
+	}
+
+	return defaultPreviousChannelTTL
+}
+
+func buildPreviousTraceChannelCacheKey(traceID int) string {
+	return fmt.Sprintf("previous_channel:trace:%d", traceID)
+}
+
+func buildPreviousThreadChannelCacheKey(threadID int) string {
+	return fmt.Sprintf("previous_channel:thread:%d", threadID)
 }
 
 // LoadRequestBody returns the stored request body, loading from external storage when necessary.

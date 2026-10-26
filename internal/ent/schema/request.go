@@ -35,6 +35,10 @@ func (Request) Indexes() []ent.Index {
 		// Performance indexes for dashboard queries
 		index.Fields("created_at").
 			StorageKey("requests_by_created_at"),
+		// Dashboard status aggregation groups the whole table by status; without this
+		// index the query degenerates into a full heap scan that saturates the database.
+		index.Fields("status").
+			StorageKey("requests_by_status"),
 	}
 }
 

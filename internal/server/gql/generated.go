@@ -1297,6 +1297,7 @@ type ComplexityRoot struct {
 		MaxChannelRetries       func(childComplexity int) int
 		MaxSingleChannelRetries func(childComplexity int) int
 		RetryDelayMs            func(childComplexity int) int
+		TraceStickyMode         func(childComplexity int) int
 	}
 
 	Role struct {
@@ -7733,6 +7734,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.RetryPolicy.RetryDelayMs(childComplexity), true
+	case "RetryPolicy.traceStickyMode":
+		if e.complexity.RetryPolicy.TraceStickyMode == nil {
+			break
+		}
+
+		return e.complexity.RetryPolicy.TraceStickyMode(childComplexity), true
 
 	case "Role.createdAt":
 		if e.complexity.Role.CreatedAt == nil {
@@ -37576,6 +37583,8 @@ func (ec *executionContext) fieldContext_Query_retryPolicy(_ context.Context, fi
 				return ec.fieldContext_RetryPolicy_autoDisableChannel(ctx, field)
 			case "emptyResponseDetection":
 				return ec.fieldContext_RetryPolicy_emptyResponseDetection(ctx, field)
+			case "traceStickyMode":
+				return ec.fieldContext_RetryPolicy_traceStickyMode(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type RetryPolicy", field.Name)
 		},
@@ -41668,6 +41677,35 @@ func (ec *executionContext) fieldContext_RetryPolicy_emptyResponseDetection(_ co
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _RetryPolicy_traceStickyMode(ctx context.Context, field graphql.CollectedField, obj *biz.RetryPolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_RetryPolicy_traceStickyMode,
+		func(ctx context.Context) (any, error) {
+			return obj.TraceStickyMode, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_RetryPolicy_traceStickyMode(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "RetryPolicy",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
 		},
 	}
 	return fc, nil
@@ -72046,7 +72084,7 @@ func (ec *executionContext) unmarshalInputUpdateRetryPolicyInput(ctx context.Con
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"maxChannelRetries", "maxSingleChannelRetries", "retryDelayMs", "loadBalancerStrategy", "enabled", "autoDisableChannel", "emptyResponseDetection"}
+	fieldsInOrder := [...]string{"maxChannelRetries", "maxSingleChannelRetries", "retryDelayMs", "loadBalancerStrategy", "enabled", "autoDisableChannel", "emptyResponseDetection", "traceStickyMode"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -72102,6 +72140,13 @@ func (ec *executionContext) unmarshalInputUpdateRetryPolicyInput(ctx context.Con
 				return it, err
 			}
 			it.EmptyResponseDetection = data
+		case "traceStickyMode":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("traceStickyMode"))
+			data, err := ec.unmarshalOString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.TraceStickyMode = data
 		}
 	}
 
@@ -88358,6 +88403,11 @@ func (ec *executionContext) _RetryPolicy(ctx context.Context, sel ast.SelectionS
 			}
 		case "emptyResponseDetection":
 			out.Values[i] = ec._RetryPolicy_emptyResponseDetection(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "traceStickyMode":
+			out.Values[i] = ec._RetryPolicy_traceStickyMode(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

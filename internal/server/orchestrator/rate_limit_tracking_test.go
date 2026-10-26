@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -292,7 +293,12 @@ func TestRateLimitTracking_OnOutboundRawError_429(t *testing.T) {
 	assert.True(t, tracker.IsCoolingDown(channel.ID))
 }
 
-func TestRateLimitTracking_OnOutboundRawError_429WithoutRetryAfter(t *testing.T) {
+// A 429 without Retry-After must still cool the channel down: on prod2 (2026-10-26) channel
+// 138 recorded 1239 failed 429 executions in one day but only 2 cooldowns, because the
+// cooldown required a Retry-After header. The balancer therefore kept selecting the
+// throttled channel, every retry moved the conversation to another channel, and the
+// conversation lost its warm prompt cache.
+func TestRateLimitTracking_OnOutboundRawError_429WithoutRetryAfterUsesDefaultCooldown(t *testing.T) {
 	tracker := NewChannelRequestTracker()
 
 	entChannel := &ent.Channel{ID: 1, Name: "test-channel"}
@@ -317,7 +323,41 @@ func TestRateLimitTracking_OnOutboundRawError_429WithoutRetryAfter(t *testing.T)
 
 	middleware.OnOutboundRawError(ctx, httpErr)
 
-	assert.False(t, tracker.IsCoolingDown(channel.ID))
+	assert.True(t, tracker.IsCoolingDown(channel.ID), "a 429 without Retry-After must still cool the channel down")
+
+	// The implicit cooldown stays short: channel 138 on prod2 kept serving requests while
+	// answering others with 429 in the same minute, so a long penalty would evict it.
+	until, ok := tracker.GetCooldownUntil(channel.ID)
+	assert.True(t, ok)
+	assert.WithinDuration(t, time.Now().Add(implicitRateLimitCooldown), until, 2*time.Second)
+}
+
+func TestRateLimitTracking_OnOutboundRawError_HonoursRetryAfter(t *testing.T) {
+	tracker := NewChannelRequestTracker()
+
+	entChannel := &ent.Channel{ID: 1, Name: "test-channel"}
+	channel := &biz.Channel{Channel: entChannel}
+
+	state := &PersistenceState{
+		CurrentCandidate: &ChannelModelsCandidate{Channel: channel},
+	}
+	outbound := &PersistentOutboundTransformer{state: state}
+
+	middleware := &rateLimitTracking{
+		outbound: outbound,
+		tracker:  tracker,
+	}
+
+	httpErr := &httpclient.Error{
+		StatusCode: http.StatusTooManyRequests,
+		Headers:    http.Header{"Retry-After": []string{"120"}},
+	}
+
+	middleware.OnOutboundRawError(context.Background(), httpErr)
+
+	until, ok := tracker.GetCooldownUntil(channel.ID)
+	assert.True(t, ok)
+	assert.WithinDuration(t, time.Now().Add(120*time.Second), until, 3*time.Second)
 }
 
 func TestRateLimitTracking_OnOutboundRawError_Not429(t *testing.T) {

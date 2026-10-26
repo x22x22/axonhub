@@ -52,6 +52,7 @@ func NewHttpClientWithProxy(proxyConfig *ProxyConfig, opts ...ClientOption) *Htt
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -131,45 +132,58 @@ func getProxyFunc(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
 }
 
 // NewHttpClient creates a new HTTP client.
+//
+// The client always gets its own transport: a factory default http.Client (nil Transport)
+// falls back to http.DefaultTransport, which only keeps maxIdleConnsPerHostDefault (2)
+// idle connections per host. The gateway opens many concurrent streams to the same
+// upstream host, so a small per-host pool makes almost every burst pay a TCP+TLS
+// handshake. The transport is cloned from http.DefaultTransport so dialer, proxy and
+// HTTP/2 defaults are preserved.
 func NewHttpClient(opts ...ClientOption) *HttpClient {
 	var options clientOptions
 	for _, opt := range opts {
 		opt(&options)
 	}
 
-	client := &http.Client{}
-	if options.insecureSkipVerify {
-		var transport *http.Transport
-		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
-			transport = defaultTransport.Clone()
-		} else {
-			// Fall back to a transport close to http.DefaultTransport when it has been replaced.
-			transport = (&http.Transport{
-				Proxy: getProxyFunc(nil),
-				DialContext: (&net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			})
-		}
+	transport := newPooledTransport()
 
+	if options.insecureSkipVerify {
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{}
 		} else {
 			transport.TLSClientConfig = transport.TLSClientConfig.Clone()
 		}
 		transport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // User-configured option for self-signed certificates
-		client.Transport = transport
 	}
 
 	return &HttpClient{
-		client: client,
+		client: &http.Client{Transport: transport},
 		opts:   opts,
+	}
+}
+
+// newPooledTransport returns a transport with a sane per-host idle connection limit.
+func newPooledTransport() *http.Transport {
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport := defaultTransport.Clone()
+		transport.MaxIdleConnsPerHost = 100
+
+		return transport
+	}
+
+	// Fall back to a transport close to http.DefaultTransport when it has been replaced.
+	return &http.Transport{
+		Proxy: getProxyFunc(nil),
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 }
 
