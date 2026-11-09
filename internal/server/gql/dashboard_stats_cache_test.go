@@ -101,3 +101,83 @@ func TestCachedDashboardStatsExpires(t *testing.T) {
 
 	require.Equal(t, int32(2), atomic.LoadInt32(&calls), "an expired entry must be reloaded")
 }
+
+// TestStatsWindowKeyDistinguishesNilFromLiteral guards a cache-poisoning bug: an
+// omitted window and the literal "default" mean different things to
+// parseTimeWindow, so they must not share a cache key.
+func TestStatsWindowKeyDistinguishesNilFromLiteral(t *testing.T) {
+	literal := "default"
+	empty := ""
+
+	require.NotEqual(t, statsWindowKey(nil), statsWindowKey(&literal))
+	require.NotEqual(t, statsWindowKey(nil), statsWindowKey(&empty))
+	require.NotEqual(t, statsWindowKey(&literal), statsWindowKey(&empty))
+}
+
+// TestCachedDashboardStatsStopsWaitingWhenCallerCancels locks in that one caller
+// giving up does not force it to wait for the shared load to finish.
+func TestCachedDashboardStatsStopsWaitingWhenCallerCancels(t *testing.T) {
+	release := make(chan struct{})
+
+	load := func(context.Context) (string, error) {
+		<-release
+
+		return "payload", nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+
+	_, err := cachedDashboardStats(ctx, "unit-cancel", load)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 2*time.Second,
+		"a canceled caller must not block on the shared load")
+
+	close(release)
+}
+
+// TestCachedDashboardStatsDoesNotShareCanceledLoad guards the other direction: a
+// canceled caller must not fail the aggregation for the waiters behind it.
+func TestCachedDashboardStatsDoesNotShareCanceledLoad(t *testing.T) {
+	loadStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	load := func(ctx context.Context) (string, error) {
+		close(loadStarted)
+		<-release
+
+		return "payload", ctx.Err()
+	}
+
+	canceledCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		// The first caller starts the shared load and then gives up.
+		_, _ = cachedDashboardStats(canceledCtx, "unit-share-cancel", load)
+	}()
+
+	<-loadStarted
+
+	goodCtx, goodCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer goodCancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		_, _ = cachedDashboardStats(goodCtx, "unit-share-cancel", load)
+	}()
+
+	// Give the canceled caller a moment to give up, then release the load.
+	time.Sleep(120 * time.Millisecond)
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the healthy waiter never returned")
+	}
+}

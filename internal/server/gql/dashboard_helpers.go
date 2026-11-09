@@ -274,7 +274,15 @@ func (r *queryResolver) parseTimeWindow(ctx context.Context, timeWindow *string)
 }
 
 // dashboardStatsTTL is how long a dashboard aggregation may be reused.
-const dashboardStatsTTL = 60 * time.Second
+const (
+	dashboardStatsTTL = 60 * time.Second
+
+	// dashboardStatsLoadTimeout bounds one shared aggregation load.
+	dashboardStatsLoadTimeout = 2 * time.Minute
+
+	// dashboardStatsCacheMaxEntries bounds the cache independently of the TTL.
+	dashboardStatsCacheMaxEntries = 256
+)
 
 type dashboardStatsEntry struct {
 	payload any
@@ -310,7 +318,14 @@ func cachedDashboardStats[T any](ctx context.Context, key string, load func(cont
 	}
 	dashboardStatsCache.mu.Unlock()
 
-	v, err, _ := dashboardStatsCache.group.Do(key, func() (any, error) {
+	// The shared load must not inherit one caller's cancellation: that caller
+	// giving up would fail the aggregation for every waiter. Keep the context
+	// values (auth, logging) but detach cancellation and bound it ourselves.
+	loadCtx, loadCancel := context.WithTimeout(context.WithoutCancel(ctx), dashboardStatsLoadTimeout)
+
+	ch := dashboardStatsCache.group.DoChan(key, func() (any, error) {
+		defer loadCancel()
+
 		// Double check inside singleflight: a concurrent call may have filled it.
 		dashboardStatsCache.mu.Lock()
 		if e, ok := dashboardStatsCache.entries[key]; ok && time.Now().Before(e.expires) {
@@ -321,48 +336,62 @@ func cachedDashboardStats[T any](ctx context.Context, key string, load func(cont
 		}
 		dashboardStatsCache.mu.Unlock()
 
-		payload, loadErr := load(ctx)
+		payload, loadErr := load(loadCtx)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 
 		dashboardStatsCache.mu.Lock()
+		now := time.Now()
 		dashboardStatsCache.entries[key] = dashboardStatsEntry{
 			payload: payload,
-			expires: time.Now().Add(dashboardStatsTTL),
+			expires: now.Add(dashboardStatsTTL),
 		}
-		// Bound the map; entries only expire, so drop them once it grows.
-		if len(dashboardStatsCache.entries) > 256 {
-			now := time.Now()
-			for k, e := range dashboardStatsCache.entries {
-				if now.After(e.expires) {
-					delete(dashboardStatsCache.entries, k)
-				}
-			}
+		// Bound the map even when nothing has expired yet: distinct windows and
+		// limits can create many fresh keys inside one TTL, and scanning an
+		// unbounded map on every insert would make cleanup quadratic.
+		if len(dashboardStatsCache.entries) > dashboardStatsCacheMaxEntries {
+			dropEarliestExpiring(dashboardStatsCache.entries, len(dashboardStatsCache.entries)/4)
 		}
 		dashboardStatsCache.mu.Unlock()
 
 		return payload, nil
 	})
-	if err != nil {
-		return zero, err
-	}
 
-	typed, ok := v.(T)
-	if !ok {
-		return zero, fmt.Errorf("dashboard stats cache type mismatch for key %q", key)
-	}
+	select {
+	case <-ctx.Done():
+		// Let the shared load finish for the other waiters; we just stop waiting.
+		return zero, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return zero, res.Err
+		}
 
-	return typed, nil
+		typed, ok := res.Val.(T)
+		if !ok {
+			return zero, fmt.Errorf("dashboard stats cache type mismatch for key %q", key)
+		}
+
+		return typed, nil
+	}
 }
 
 // statsWindowKey turns a nullable time window into a cache key component.
+//
+// The nil sentinel and an explicit string must not collide: an omitted window
+// defaults differently from the literal "default" in parseTimeWindow, so sharing
+// one key would let whichever request populates the cache first decide the other
+// request's result.
 func statsWindowKey(timeWindow *string) string {
-	if timeWindow == nil || *timeWindow == "" {
-		return "default"
+	if timeWindow == nil {
+		return "\x00unset"
 	}
 
-	return *timeWindow
+	if *timeWindow == "" {
+		return "\x00empty"
+	}
+
+	return "\x00s:" + *timeWindow
 }
 
 // statsLimitKey turns a nullable limit into a cache key component.
@@ -372,4 +401,35 @@ func statsLimitKey(limit *int) string {
 	}
 
 	return fmt.Sprintf("%d", *limit)
+}
+
+// dropEarliestExpiring evicts the n entries closest to expiry, expired or not.
+//
+// Called with the cache mutex held.
+func dropEarliestExpiring(entries map[string]dashboardStatsEntry, n int) {
+	if n <= 0 || len(entries) == 0 {
+		return
+	}
+
+	type victim struct {
+		key     string
+		expires time.Time
+	}
+
+	victims := make([]victim, 0, len(entries))
+	for k, e := range entries {
+		victims = append(victims, victim{key: k, expires: e.expires})
+	}
+
+	sort.Slice(victims, func(i, j int) bool {
+		return victims[i].expires.Before(victims[j].expires)
+	})
+
+	if n > len(victims) {
+		n = len(victims)
+	}
+
+	for _, v := range victims[:n] {
+		delete(entries, v.key)
+	}
 }
