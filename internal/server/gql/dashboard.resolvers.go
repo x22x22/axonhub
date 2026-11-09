@@ -38,6 +38,21 @@ import (
 func (r *queryResolver) DashboardOverview(ctx context.Context) (*DashboardOverview, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
+	}
+
+	return cachedDashboardStats(ctx, "dashboardOverview", func(ctx context.Context) (*DashboardOverview, error) {
+		return r.dashboardOverviewUncached(ctx)
+	})
+}
+
+func (r *queryResolver) dashboardOverviewUncached(ctx context.Context) (*DashboardOverview, error) {
+
 	// Initialize response with defaults to handle partial failures gracefully
 	stats := &DashboardOverview{
 		TotalRequests:       0,
@@ -46,21 +61,34 @@ func (r *queryResolver) DashboardOverview(ctx context.Context) (*DashboardOvervi
 	}
 
 	// Get total and failed requests in a single query by status grouping
-	var statusCounts []struct {
-		Status request.Status `json:"status"`
-		Count  int            `json:"count"`
+	var statusCounts []requestStatusCount
+
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewCounts, viewErr := r.dashboardOverviewFromViews(ctx)
+		if viewErr != nil {
+			log.Warn(ctx, "failed to count requests by status from stats views, falling back to detail",
+				log.Cause(viewErr))
+
+			useViews = false
+		} else {
+			statusCounts = viewCounts
+		}
 	}
-	if err := r.client.Request.Query().
-		GroupBy(request.FieldStatus).
-		Aggregate(ent.Count()).
-		Scan(ctx, &statusCounts); err != nil {
-		log.Warn(ctx, "failed to count requests by status", log.Cause(err))
-	} else {
-		for _, sc := range statusCounts {
-			stats.TotalRequests += sc.Count
-			if sc.Status == request.StatusFailed {
-				stats.FailedRequests = sc.Count
-			}
+
+	if !useViews {
+		if err := r.client.Request.Query().
+			GroupBy(request.FieldStatus).
+			Aggregate(ent.Count()).
+			Scan(ctx, &statusCounts); err != nil {
+			log.Warn(ctx, "failed to count requests by status", log.Cause(err))
+		}
+	}
+
+	for _, sc := range statusCounts {
+		stats.TotalRequests += sc.Count
+		if sc.Status == request.StatusFailed {
+			stats.FailedRequests = sc.Count
 		}
 	}
 
@@ -127,48 +155,72 @@ func (r *queryResolver) RequestStats(ctx context.Context) (*RequestStats, error)
 func (r *queryResolver) RequestStatsByChannel(ctx context.Context, timeWindow *string) ([]*RequestStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
-
-	// Use efficient aggregation query with JOIN to get channel details and filter out deleted channels
-	type channelStats struct {
-		ChannelName string `json:"channel_name"`
-		Count       int    `json:"count"`
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
 	}
+
+	return cachedDashboardStats(ctx, "requestStatsByChannel:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*RequestStatsByChannel, error) {
+		return r.requestStatsByChannelUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) requestStatsByChannelUncached(ctx context.Context, timeWindow *string) ([]*RequestStatsByChannel, error) {
+
+	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	var results []channelStats
 
-	// Aggregate by channel directly in the database using usage_logs table joined with channels
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			channelTable := sql.Table(channel.Table)
-			s.Join(channelTable).On(
-				s.C(usagelog.FieldChannelID),
-				channelTable.C(channel.FieldID),
-			)
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.requestStatsByChannelFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read request stats by channel from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			// Filter: only non-deleted channels
-			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			// Apply time window filter when provided
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+	if !useViews {
+		// Aggregate by channel directly in the database using usage_logs table joined with channels
+		err := r.client.UsageLog.Query().
+			Modify(func(s *sql.Selector) {
+				channelTable := sql.Table(channel.Table)
+				s.Join(channelTable).On(
+					s.C(usagelog.FieldChannelID),
+					channelTable.C(channel.FieldID),
+				)
 
-			// Group by channel fields to get names and types directly
-			s.GroupBy(channelTable.C(channel.FieldName))
+				// Filter: only non-deleted channels
+				s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
 
-			// Select fields: channel name, type and the count of logs
-			s.Select(
-				sql.As(channelTable.C(channel.FieldName), "channel_name"),
-				sql.As(sql.Count(s.C(usagelog.FieldID)), "count"),
-			)
+				// Apply time window filter when provided
+				if applyFilter {
+					s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
+				}
 
-			// Order by count descending and limit to top 10
-			s.OrderBy(sql.Desc("count")).Limit(10)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get requests by channel: %w", err)
+				// Group by channel fields to get names and types directly
+				s.GroupBy(channelTable.C(channel.FieldName))
+
+				// Select fields: channel name, type and the count of logs
+				s.Select(
+					sql.As(channelTable.C(channel.FieldName), "channel_name"),
+					sql.As(sql.Count(s.C(usagelog.FieldID)), "count"),
+				)
+
+				// Order by count descending and limit to top 10
+				s.OrderBy(sql.Desc("count")).Limit(10)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get requests by channel: %w", err)
+		}
 	}
 
 	// Build response directly from aggregated results
@@ -235,30 +287,54 @@ func (r *queryResolver) RequestStatsByModel(ctx context.Context, timeWindow *str
 func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*RequestStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
-
-	type apiKeyStats struct {
-		APIKeyID int `json:"api_key_id"`
-		Count    int `json:"request_count"`
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
 	}
+
+	return cachedDashboardStats(ctx, "requestStatsByAPIKey:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*RequestStatsByAPIKey, error) {
+		return r.requestStatsByAPIKeyUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) requestStatsByAPIKeyUncached(ctx context.Context, timeWindow *string) ([]*RequestStatsByAPIKey, error) {
+
+	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	var results []apiKeyStats
 
-	// Database-level aggregation
-	query := r.client.UsageLog.Query().
-		Where(usagelog.APIKeyIDNotNil())
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.requestStatsByAPIKeyFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read request stats by API key from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-	// Apply time window filter when provided
-	if applyFilter {
-		query = query.Where(usagelog.CreatedAtGTE(since))
+			useViews = false
+		} else {
+			results = viewResults
+		}
 	}
 
-	err := query.
-		GroupBy(usagelog.FieldAPIKeyID).
-		Aggregate(ent.As(ent.Count(), "request_count")).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get requests by API key: %w", err)
+	if !useViews {
+		query := r.client.UsageLog.Query().
+			Where(usagelog.APIKeyIDNotNil())
+
+		// Apply time window filter when provided
+		if applyFilter {
+			query = query.Where(usagelog.CreatedAtGTE(since))
+		}
+
+		err := query.
+			GroupBy(usagelog.FieldAPIKeyID).
+			Aggregate(ent.As(ent.Count(), "request_count")).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get requests by API key: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
@@ -314,51 +390,73 @@ func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *st
 func (r *queryResolver) TokenStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*TokenStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
-
-	type tokenStats struct {
-		APIKeyID        int   `json:"api_key_id"`
-		InputTokens     int64 `json:"input_tokens"`
-		OutputTokens    int64 `json:"output_tokens"`
-		CachedTokens    int64 `json:"cached_tokens"`
-		ReasoningTokens int64 `json:"reasoning_tokens"`
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
 	}
+
+	return cachedDashboardStats(ctx, "tokenStatsByAPIKey:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*TokenStatsByAPIKey, error) {
+		return r.tokenStatsByAPIKeyUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) tokenStatsByAPIKeyUncached(ctx context.Context, timeWindow *string) ([]*TokenStatsByAPIKey, error) {
+
+	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	var results []tokenStats
 
-	// Database-level aggregation with JOIN
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			// Join to requests table to get api_key_id
-			requestTable := sql.Table(request.Table)
-			s.Join(requestTable).On(
-				s.C(usagelog.FieldRequestID),
-				requestTable.C(request.FieldID),
-			)
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.tokenStatsByAPIKeyFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read token stats by API key from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			// Filter: only requests with non-null api_key_id
-			s.Where(sql.NotNull(requestTable.C(request.FieldAPIKeyID)))
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			// Apply time window filter when provided
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+	if !useViews {
+		// Database-level aggregation with JOIN
+		err := r.client.UsageLog.Query().
+			Modify(func(s *sql.Selector) {
+				// Join to requests table to get api_key_id
+				requestTable := sql.Table(request.Table)
+				s.Join(requestTable).On(
+					s.C(usagelog.FieldRequestID),
+					requestTable.C(request.FieldID),
+				)
 
-			// Group by api_key_id
-			s.GroupBy(requestTable.C(request.FieldAPIKeyID))
+				// Filter: only requests with non-null api_key_id
+				s.Where(sql.NotNull(requestTable.C(request.FieldAPIKeyID)))
 
-			// Select aggregations
-			s.Select(
-				sql.As(requestTable.C(request.FieldAPIKeyID), "api_key_id"),
-				sql.As(sql.Sum(s.C(usagelog.FieldPromptTokens)), "input_tokens"),
-				sql.As(sql.Sum(s.C(usagelog.FieldCompletionTokens)), "output_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionReasoningTokens)), "reasoning_tokens"),
-			)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tokens by API key: %w", err)
+				// Apply time window filter when provided
+				if applyFilter {
+					s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
+				}
+
+				// Group by api_key_id
+				s.GroupBy(requestTable.C(request.FieldAPIKeyID))
+
+				// Select aggregations
+				s.Select(
+					sql.As(requestTable.C(request.FieldAPIKeyID), "api_key_id"),
+					sql.As(sql.Sum(s.C(usagelog.FieldPromptTokens)), "input_tokens"),
+					sql.As(sql.Sum(s.C(usagelog.FieldCompletionTokens)), "output_tokens"),
+					sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
+					sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionReasoningTokens)), "reasoning_tokens"),
+				)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get tokens by API key: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
@@ -496,6 +594,21 @@ func (r *queryResolver) APIKeyTokenUsageStats(ctx context.Context, input *APIKey
 // Provides result-only daily metrics for the last 30 days.
 func (r *queryResolver) DailyRequestStats(ctx context.Context) ([]*DailyRequestStats, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
+
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
+	}
+
+	return cachedDashboardStats(ctx, "dailyRequestStats", func(ctx context.Context) ([]*DailyRequestStats, error) {
+		return r.dailyRequestStatsUncached(ctx)
+	})
+}
+
+func (r *queryResolver) dailyRequestStatsUncached(ctx context.Context) ([]*DailyRequestStats, error) {
 
 	daysCount := 30
 
@@ -662,6 +775,21 @@ func (r *queryResolver) TopRequestsProjects(ctx context.Context) ([]*TopRequests
 // Provides result-only token metrics aggregated by calendar periods.
 func (r *queryResolver) TokenStats(ctx context.Context) (*TokenStats, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
+
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
+	}
+
+	return cachedDashboardStats(ctx, "tokenStats", func(ctx context.Context) (*TokenStats, error) {
+		return r.tokenStatsUncached(ctx)
+	})
+}
+
+func (r *queryResolver) tokenStatsUncached(ctx context.Context) (*TokenStats, error) {
 
 	// Initialize response with defaults to handle partial failures gracefully
 	stats := &TokenStats{
@@ -867,6 +995,21 @@ func (r *queryResolver) TokenStats(ctx context.Context) (*TokenStats, error) {
 func (r *queryResolver) ChannelSuccessRates(ctx context.Context, timeWindow *string, limit *int) ([]*ChannelSuccessRate, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
+	}
+
+	return cachedDashboardStats(ctx, "channelSuccessRates:"+statsWindowKey(timeWindow)+":"+statsLimitKey(limit), func(ctx context.Context) ([]*ChannelSuccessRate, error) {
+		return r.channelSuccessRatesUncached(ctx, timeWindow, limit)
+	})
+}
+
+func (r *queryResolver) channelSuccessRatesUncached(ctx context.Context, timeWindow *string, limit *int) ([]*ChannelSuccessRate, error) {
+
 	// Parse time window, default to "day"
 	if timeWindow == nil || *timeWindow == "" {
 		defaultWindow := "day"
@@ -880,34 +1023,46 @@ func (r *queryResolver) ChannelSuccessRates(ctx context.Context, timeWindow *str
 		limitCount = *limit
 	}
 
-	type channelExecutionStats struct {
-		ChannelID    int `json:"channel_id"`
-		SuccessCount int `json:"success_count"`
-		FailedCount  int `json:"failed_count"`
-	}
-
 	var results []channelExecutionStats
 
-	// Use raw SQL to aggregate execution stats by channel
-	err := r.client.RequestExecution.Query().
-		Modify(func(s *sql.Selector) {
-			s.Select(
-				requestexecution.FieldChannelID,
-				sql.As("SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)", "success_count"),
-				sql.As("SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)", "failed_count"),
-			).
-				Where(sql.NotNull(requestexecution.FieldChannelID))
+	// Prefer the daily aggregate; it is ~80,000x faster than scanning
+	// request_executions (1.2TB of toast). "Today" still comes from the detail
+	// table so the numbers are live.
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.channelSuccessRatesFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read channel success rates from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			// Apply time filter
-			if applyFilter {
-				s.Where(sql.GTE(s.C(requestexecution.FieldCreatedAt), since))
-			}
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			s.GroupBy(requestexecution.FieldChannelID)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get channel execution stats: %w", err)
+	if !useViews {
+		// Use raw SQL to aggregate execution stats by channel
+		err := r.client.RequestExecution.Query().
+			Modify(func(s *sql.Selector) {
+				s.Select(
+					requestexecution.FieldChannelID,
+					sql.As("SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)", "success_count"),
+					sql.As("SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)", "failed_count"),
+				).
+					Where(sql.NotNull(requestexecution.FieldChannelID))
+
+				// Apply time filter
+				if applyFilter {
+					s.Where(sql.GTE(s.C(requestexecution.FieldCreatedAt), since))
+				}
+
+				s.GroupBy(requestexecution.FieldChannelID)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get channel execution stats: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
@@ -1447,17 +1602,52 @@ func (r *queryResolver) ChannelPerformanceStats(ctx context.Context) ([]*Channel
 func (r *queryResolver) TokenStatsByChannel(ctx context.Context, timeWindow *string) ([]*TokenStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
-
-	type channelTokenStats struct {
-		ChannelName     string `json:"channel_name"`
-		InputTokens     int64  `json:"input_tokens"`
-		OutputTokens    int64  `json:"output_tokens"`
-		CachedTokens    int64  `json:"cached_tokens"`
-		ReasoningTokens int64  `json:"reasoning_tokens"`
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
 	}
 
+	return cachedDashboardStats(ctx, "tokenStatsByChannel:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*TokenStatsByChannel, error) {
+		return r.tokenStatsByChannelUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) tokenStatsByChannelUncached(ctx context.Context, timeWindow *string) ([]*TokenStatsByChannel, error) {
+
+	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+
 	var results []channelTokenStats
+
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.tokenStatsByChannelFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read token stats by channel from stats views, falling back to detail tables",
+				log.Cause(viewErr))
+
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
+
+	if useViews {
+		return lo.Map(results, func(item channelTokenStats, _ int) *TokenStatsByChannel {
+			totalTokens := item.InputTokens + item.OutputTokens + item.ReasoningTokens
+
+			return &TokenStatsByChannel{
+				ChannelName:     item.ChannelName,
+				InputTokens:     int(item.InputTokens),
+				OutputTokens:    int(item.OutputTokens),
+				CachedTokens:    int(item.CachedTokens),
+				ReasoningTokens: int(item.ReasoningTokens),
+				TotalTokens:     int(totalTokens),
+			}
+		}), nil
+	}
 
 	err := r.client.UsageLog.Query().
 		Modify(func(s *sql.Selector) {
@@ -1571,14 +1761,46 @@ func (r *queryResolver) TokenStatsByModel(ctx context.Context, timeWindow *strin
 func (r *queryResolver) CostStatsByChannel(ctx context.Context, timeWindow *string) ([]*CostStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
-
-	type channelCostStats struct {
-		ChannelName string  `json:"channel_name"`
-		Cost        float64 `json:"total_cost"`
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
 	}
 
+	return cachedDashboardStats(ctx, "costStatsByChannel:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*CostStatsByChannel, error) {
+		return r.costStatsByChannelUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) costStatsByChannelUncached(ctx context.Context, timeWindow *string) ([]*CostStatsByChannel, error) {
+
+	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+
 	var results []channelCostStats
+
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.costStatsByChannelFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read cost stats by channel from stats views, falling back to detail tables",
+				log.Cause(viewErr))
+
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
+
+	if useViews {
+		return lo.Map(results, func(item channelCostStats, _ int) *CostStatsByChannel {
+			return &CostStatsByChannel{
+				ChannelName: item.ChannelName,
+				Cost:        item.Cost,
+			}
+		}), nil
+	}
 
 	err := r.client.UsageLog.Query().
 		Modify(func(s *sql.Selector) {
@@ -1665,36 +1887,61 @@ func (r *queryResolver) CostStatsByModel(ctx context.Context, timeWindow *string
 func (r *queryResolver) CostStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*CostStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
-
-	type apiKeyCostStats struct {
-		APIKeyID int     `json:"api_key_id"`
-		Cost     float64 `json:"total_cost"`
+	// WithScopeDecision only records a decision for the Ent interceptor, which
+	// never runs when the value comes from the cache or a singleflight waiter.
+	// Enforce the scope explicitly, otherwise a principal without read_dashboard
+	// could read installation-wide statistics warmed by another user.
+	if err := authz.RequireScope(ctx, scopes.ScopeReadDashboard); err != nil {
+		return nil, err
 	}
+
+	return cachedDashboardStats(ctx, "costStatsByAPIKey:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*CostStatsByAPIKey, error) {
+		return r.costStatsByAPIKeyUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) costStatsByAPIKeyUncached(ctx context.Context, timeWindow *string) ([]*CostStatsByAPIKey, error) {
+
+	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	var results []apiKeyCostStats
 
-	err := r.client.UsageLog.Query().
-		Where(usagelog.APIKeyIDNotNil()).
-		Modify(func(s *sql.Selector) {
-			// Apply time window filtering
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.costStatsByAPIKeyFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read cost stats by API key from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			s.GroupBy(s.C(usagelog.FieldAPIKeyID))
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			s.Select(
-				s.C(usagelog.FieldAPIKeyID),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
-			)
+	if !useViews {
+		err := r.client.UsageLog.Query().
+			Where(usagelog.APIKeyIDNotNil()).
+			Modify(func(s *sql.Selector) {
+				// Apply time window filtering
+				if applyFilter {
+					s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
+				}
 
-			s.OrderBy(sql.Desc("total_cost"))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cost by API key: %w", err)
+				s.GroupBy(s.C(usagelog.FieldAPIKeyID))
+
+				s.Select(
+					s.C(usagelog.FieldAPIKeyID),
+					sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
+				)
+
+				s.OrderBy(sql.Desc("total_cost"))
+				s.Limit(10)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get cost by API key: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
