@@ -38,6 +38,13 @@ import (
 func (r *queryResolver) DashboardOverview(ctx context.Context) (*DashboardOverview, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	return cachedDashboardStats(ctx, "dashboardOverview", func(ctx context.Context) (*DashboardOverview, error) {
+		return r.dashboardOverviewUncached(ctx)
+	})
+}
+
+func (r *queryResolver) dashboardOverviewUncached(ctx context.Context) (*DashboardOverview, error) {
+
 	// Initialize response with defaults to handle partial failures gracefully
 	stats := &DashboardOverview{
 		TotalRequests:       0,
@@ -126,6 +133,13 @@ func (r *queryResolver) RequestStats(ctx context.Context) (*RequestStats, error)
 // For channel-level process tracking (e.g., success/failure rates), use request_execution table.
 func (r *queryResolver) RequestStatsByChannel(ctx context.Context, timeWindow *string) ([]*RequestStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
+
+	return cachedDashboardStats(ctx, "requestStatsByChannel:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*RequestStatsByChannel, error) {
+		return r.requestStatsByChannelUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) requestStatsByChannelUncached(ctx context.Context, timeWindow *string) ([]*RequestStatsByChannel, error) {
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
@@ -235,6 +249,13 @@ func (r *queryResolver) RequestStatsByModel(ctx context.Context, timeWindow *str
 func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*RequestStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	return cachedDashboardStats(ctx, "requestStatsByAPIKey:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*RequestStatsByAPIKey, error) {
+		return r.requestStatsByAPIKeyUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) requestStatsByAPIKeyUncached(ctx context.Context, timeWindow *string) ([]*RequestStatsByAPIKey, error) {
+
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type apiKeyStats struct {
@@ -313,6 +334,13 @@ func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *st
 // This provides actual token usage (input, output, cached, reasoning) per API key.
 func (r *queryResolver) TokenStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*TokenStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
+
+	return cachedDashboardStats(ctx, "tokenStatsByAPIKey:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*TokenStatsByAPIKey, error) {
+		return r.tokenStatsByAPIKeyUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) tokenStatsByAPIKeyUncached(ctx context.Context, timeWindow *string) ([]*TokenStatsByAPIKey, error) {
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
@@ -497,6 +525,13 @@ func (r *queryResolver) APIKeyTokenUsageStats(ctx context.Context, input *APIKey
 func (r *queryResolver) DailyRequestStats(ctx context.Context) ([]*DailyRequestStats, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	return cachedDashboardStats(ctx, "dailyRequestStats", func(ctx context.Context) ([]*DailyRequestStats, error) {
+		return r.dailyRequestStatsUncached(ctx)
+	})
+}
+
+func (r *queryResolver) dailyRequestStatsUncached(ctx context.Context) ([]*DailyRequestStats, error) {
+
 	daysCount := 30
 
 	loc := r.systemService.TimeLocation(ctx)
@@ -662,6 +697,13 @@ func (r *queryResolver) TopRequestsProjects(ctx context.Context) ([]*TopRequests
 // Provides result-only token metrics aggregated by calendar periods.
 func (r *queryResolver) TokenStats(ctx context.Context) (*TokenStats, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
+
+	return cachedDashboardStats(ctx, "tokenStats", func(ctx context.Context) (*TokenStats, error) {
+		return r.tokenStatsUncached(ctx)
+	})
+}
+
+func (r *queryResolver) tokenStatsUncached(ctx context.Context) (*TokenStats, error) {
 
 	// Initialize response with defaults to handle partial failures gracefully
 	stats := &TokenStats{
@@ -866,6 +908,13 @@ func (r *queryResolver) TokenStats(ctx context.Context) (*TokenStats, error) {
 // For result-only channel statistics, use RequestStatsByChannel instead.
 func (r *queryResolver) ChannelSuccessRates(ctx context.Context, timeWindow *string, limit *int) ([]*ChannelSuccessRate, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
+
+	return cachedDashboardStats(ctx, "channelSuccessRates:"+statsWindowKey(timeWindow)+":"+statsLimitKey(limit), func(ctx context.Context) ([]*ChannelSuccessRate, error) {
+		return r.channelSuccessRatesUncached(ctx, timeWindow, limit)
+	})
+}
+
+func (r *queryResolver) channelSuccessRatesUncached(ctx context.Context, timeWindow *string, limit *int) ([]*ChannelSuccessRate, error) {
 
 	// Parse time window, default to "day"
 	if timeWindow == nil || *timeWindow == "" {
@@ -1447,6 +1496,13 @@ func (r *queryResolver) ChannelPerformanceStats(ctx context.Context) ([]*Channel
 func (r *queryResolver) TokenStatsByChannel(ctx context.Context, timeWindow *string) ([]*TokenStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	return cachedDashboardStats(ctx, "tokenStatsByChannel:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*TokenStatsByChannel, error) {
+		return r.tokenStatsByChannelUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) tokenStatsByChannelUncached(ctx context.Context, timeWindow *string) ([]*TokenStatsByChannel, error) {
+
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type channelTokenStats struct {
@@ -1571,6 +1627,13 @@ func (r *queryResolver) TokenStatsByModel(ctx context.Context, timeWindow *strin
 func (r *queryResolver) CostStatsByChannel(ctx context.Context, timeWindow *string) ([]*CostStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
+	return cachedDashboardStats(ctx, "costStatsByChannel:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*CostStatsByChannel, error) {
+		return r.costStatsByChannelUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) costStatsByChannelUncached(ctx context.Context, timeWindow *string) ([]*CostStatsByChannel, error) {
+
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type channelCostStats struct {
@@ -1664,6 +1727,13 @@ func (r *queryResolver) CostStatsByModel(ctx context.Context, timeWindow *string
 // CostStatsByAPIKey is the resolver for the costStatsByAPIKey field.
 func (r *queryResolver) CostStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*CostStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
+
+	return cachedDashboardStats(ctx, "costStatsByAPIKey:"+statsWindowKey(timeWindow), func(ctx context.Context) ([]*CostStatsByAPIKey, error) {
+		return r.costStatsByAPIKeyUncached(ctx, timeWindow)
+	})
+}
+
+func (r *queryResolver) costStatsByAPIKeyUncached(ctx context.Context, timeWindow *string) ([]*CostStatsByAPIKey, error) {
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 

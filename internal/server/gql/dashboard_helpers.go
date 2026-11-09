@@ -272,3 +272,104 @@ func (r *queryResolver) parseTimeWindow(ctx context.Context, timeWindow *string)
 
 	return since, applyFilter
 }
+
+// dashboardStatsTTL is how long a dashboard aggregation may be reused.
+const dashboardStatsTTL = 60 * time.Second
+
+type dashboardStatsEntry struct {
+	payload any
+	expires time.Time
+}
+
+var dashboardStatsCache = struct {
+	mu      sync.Mutex
+	entries map[string]dashboardStatsEntry
+	group   singleflight.Group
+}{
+	entries: make(map[string]dashboardStatsEntry),
+}
+
+// cachedDashboardStats reuses a dashboard aggregation for dashboardStatsTTL.
+//
+// Every dashboard resolver runs a full-table aggregation over requests /
+// usage_logs, which takes seconds on a multi-terabyte database, and a single
+// dashboard page renders a dozen of them at once. Without a cache one page load
+// pins the database for minutes, which is exactly what the dashboard showed.
+//
+// The key must include every argument that can change the result; callers are
+// responsible for that.
+func cachedDashboardStats[T any](ctx context.Context, key string, load func(context.Context) (T, error)) (T, error) {
+	var zero T
+
+	dashboardStatsCache.mu.Lock()
+	if e, ok := dashboardStatsCache.entries[key]; ok && time.Now().Before(e.expires) {
+		if typed, ok := e.payload.(T); ok {
+			dashboardStatsCache.mu.Unlock()
+			return typed, nil
+		}
+	}
+	dashboardStatsCache.mu.Unlock()
+
+	v, err, _ := dashboardStatsCache.group.Do(key, func() (any, error) {
+		// Double check inside singleflight: a concurrent call may have filled it.
+		dashboardStatsCache.mu.Lock()
+		if e, ok := dashboardStatsCache.entries[key]; ok && time.Now().Before(e.expires) {
+			if typed, ok := e.payload.(T); ok {
+				dashboardStatsCache.mu.Unlock()
+				return typed, nil
+			}
+		}
+		dashboardStatsCache.mu.Unlock()
+
+		payload, loadErr := load(ctx)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+
+		dashboardStatsCache.mu.Lock()
+		dashboardStatsCache.entries[key] = dashboardStatsEntry{
+			payload: payload,
+			expires: time.Now().Add(dashboardStatsTTL),
+		}
+		// Bound the map; entries only expire, so drop them once it grows.
+		if len(dashboardStatsCache.entries) > 256 {
+			now := time.Now()
+			for k, e := range dashboardStatsCache.entries {
+				if now.After(e.expires) {
+					delete(dashboardStatsCache.entries, k)
+				}
+			}
+		}
+		dashboardStatsCache.mu.Unlock()
+
+		return payload, nil
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	typed, ok := v.(T)
+	if !ok {
+		return zero, fmt.Errorf("dashboard stats cache type mismatch for key %q", key)
+	}
+
+	return typed, nil
+}
+
+// statsWindowKey turns a nullable time window into a cache key component.
+func statsWindowKey(timeWindow *string) string {
+	if timeWindow == nil || *timeWindow == "" {
+		return "default"
+	}
+
+	return *timeWindow
+}
+
+// statsLimitKey turns a nullable limit into a cache key component.
+func statsLimitKey(limit *int) string {
+	if limit == nil {
+		return "default"
+	}
+
+	return fmt.Sprintf("%d", *limit)
+}
