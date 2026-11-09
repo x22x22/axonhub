@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -21,13 +22,12 @@ var dashboardStatsViews = []string{
 }
 
 const (
-	// dashboardStatsRefreshHour is the local hour the views are refreshed.
+	// dashboardStatsRefreshInterval is how often the aggregates are refreshed.
 	//
-	// The views only need history: the resolvers read "today" straight from the
-	// detail tables, and a day's history never changes after it ends. One refresh
-	// a day at a quiet hour is therefore enough, and it keeps the IO away from
-	// request traffic.
-	dashboardStatsRefreshHour = 3
+	// Five minutes keeps "today" close to live while staying well above the time a
+	// full refresh takes (~50s for all three views on the production dataset). A
+	// run that overruns the interval does not start another one; see loop.
+	dashboardStatsRefreshInterval = 5 * time.Minute
 
 	// dashboardStatsRefreshTimeout bounds a single refresh so a stuck refresh
 	// cannot hold a connection forever.
@@ -45,6 +45,10 @@ const (
 type StatsViewRefresher struct {
 	client *ent.Client
 	cancel context.CancelFunc
+
+	// running guards the refresh: at most one run at a time, and a tick that
+	// arrives while a run is still in flight is skipped instead of queued.
+	running atomic.Bool
 }
 
 // NewStatsViewRefresher creates the refresher.
@@ -66,7 +70,7 @@ func (r *StatsViewRefresher) Start(ctx context.Context) error {
 	go r.loop(runCtx)
 
 	log.Info(ctx, "dashboard stats view refresher started",
-		log.Int("hour", dashboardStatsRefreshHour),
+		log.String("interval", dashboardStatsRefreshInterval.String()),
 		log.Int("views", len(dashboardStatsViews)))
 
 	return nil
@@ -81,31 +85,34 @@ func (r *StatsViewRefresher) Stop(ctx context.Context) error {
 	return nil
 }
 
+// loop refreshes on a fixed interval, one run at a time.
+//
+// If a run is still in flight when the next tick fires, that tick is skipped: the
+// aggregates are a cache, so a missed update is harmless, while queueing runs
+// would pile overlapping IO onto the database that also serves request traffic.
 func (r *StatsViewRefresher) loop(ctx context.Context) {
-	for {
-		next := nextDashboardStatsRefresh(time.Now())
-		timer := time.NewTimer(time.Until(next))
+	ticker := time.NewTicker(dashboardStatsRefreshInterval)
+	defer ticker.Stop()
 
+	for {
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-
 			return
-		case <-timer.C:
-			r.refreshAll(ctx)
+		case <-ticker.C:
+			if !r.running.CompareAndSwap(false, true) {
+				log.Info(ctx, "Dashboard stats refresh is still running, skipping this interval",
+					log.String("interval", dashboardStatsRefreshInterval.String()))
+
+				continue
+			}
+
+			go func() {
+				defer r.running.Store(false)
+
+				r.refreshAll(ctx)
+			}()
 		}
 	}
-}
-
-// nextDashboardStatsRefresh returns the next occurrence of the refresh hour.
-func nextDashboardStatsRefresh(now time.Time) time.Time {
-	next := time.Date(now.Year(), now.Month(), now.Day(),
-		dashboardStatsRefreshHour, 0, 0, 0, now.Location())
-	if !next.After(now) {
-		next = next.Add(24 * time.Hour)
-	}
-
-	return next
 }
 
 func (r *StatsViewRefresher) refreshAll(ctx context.Context) {
