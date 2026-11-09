@@ -75,6 +75,7 @@ func NewChatCompletionOrchestrator(
 		failoverLoadBalancer:       failoverLoadBalancer,
 		circuitBreakerLoadBalancer: circuitBreakerLoadBalancer,
 		modelCircuitBreaker:        modelCircuitBreaker,
+		lastLoggedStrategy:         &sync.Map{},
 		proxy:                      nil,
 	}
 }
@@ -115,7 +116,10 @@ type ChatCompletionOrchestrator struct {
 	// The strategy is derived per API key (deriveLoadBalancerStrategy), so a single
 	// shared slot made two keys on different strategies flip the recorded value on
 	// every request and log at info level each time.
-	lastLoggedStrategy sync.Map
+	// lastLoggedStrategy must be shared through a pointer: the With* helpers
+	// shallow-copy the orchestrator, and a sync.Map must not be copied after it
+	// has been used.
+	lastLoggedStrategy *sync.Map
 
 	// proxy is the proxy configuration for testing
 	// If set, it will override the channel's default proxy configuration
@@ -375,7 +379,11 @@ func newLoadBalancers(
 // logged at info level, so a profile override that silently drops trace affinity can
 // be traced from logs instead of being inferred from cache miss patterns later.
 func (processor *ChatCompletionOrchestrator) logStrategy(ctx context.Context, strategy, systemDefault string, apiKeyID int) {
-	previous, changed := strategyLogGate(&processor.lastLoggedStrategy, apiKeyID, strategy)
+	if processor.lastLoggedStrategy == nil {
+		return
+	}
+
+	previous, changed := strategyLogGate(processor.lastLoggedStrategy, apiKeyID, strategy)
 	if !changed {
 		if log.DebugEnabled(ctx) {
 			log.Debug(ctx, "chat completion load balancer strategy",

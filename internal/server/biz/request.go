@@ -1225,12 +1225,25 @@ func (s *RequestService) LoadResponseBody(ctx context.Context, req *ent.Request)
 	key := GenerateResponseBodyKey(projectID, req.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
-	if err != nil {
+	// The write path falls back to the database column when the external
+	// storage is unavailable, so the read path must honor the same
+	// fallback; otherwise a body that was written to the database can never
+	// be read back.
+	if err != nil || len(data) == 0 {
+		if req.ResponseBody != nil {
+			return req.ResponseBody, nil
+		}
+
 		return xjson.EmptyJSONRawMessage, nil
 	}
 
 	if json.Valid(data) {
 		return objects.JSONRawMessage(data), nil
+	}
+
+	// A corrupt external payload should not hide a good database copy.
+	if req.ResponseBody != nil {
+		return req.ResponseBody, nil
 	}
 
 	return xjson.EmptyJSONRawMessage, nil
@@ -1351,12 +1364,25 @@ func (s *RequestService) LoadRequestExecutionResponseBody(ctx context.Context, e
 	key := GenerateExecutionResponseBodyKey(projectID, requestID, exec.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
-	if err != nil {
+	// The write path falls back to the database column when the external
+	// storage is unavailable, so the read path must honor the same
+	// fallback; otherwise a body that was written to the database can never
+	// be read back.
+	if err != nil || len(data) == 0 {
+		if exec.ResponseBody != nil {
+			return exec.ResponseBody, nil
+		}
+
 		return xjson.EmptyJSONRawMessage, nil
 	}
 
 	if json.Valid(data) {
 		return objects.JSONRawMessage(data), nil
+	}
+
+	// A corrupt external payload should not hide a good database copy.
+	if exec.ResponseBody != nil {
+		return exec.ResponseBody, nil
 	}
 
 	return xjson.EmptyJSONRawMessage, nil

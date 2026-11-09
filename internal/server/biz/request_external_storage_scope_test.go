@@ -183,8 +183,12 @@ func TestUpdateRequestCompletedFallsBackToDatabaseWhenExternalStorageFails(t *te
 		DataStorageService: dataStorageService,
 	}
 
-	// A directory that cannot be created makes SaveData fail deterministically.
-	unwritable := "/nonexistent-axonhub-fallback-test/sub"
+	// Make the storage root a regular file so directory creation fails no
+	// matter which user runs the test (a root container could create /paths).
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+
+	unwritable := filepath.Join(blocker, "sub")
 
 	ds, err := client.DataStorage.Create().
 		SetName("fs-unwritable").
@@ -213,4 +217,63 @@ func TestUpdateRequestCompletedFallsBackToDatabaseWhenExternalStorageFails(t *te
 	require.NoError(t, err)
 	require.JSONEq(t, string(payload), string(saved.ResponseBody),
 		"response body must be stored in the database when the external storage is unavailable")
+}
+
+// TestLoadResponseBodyReadsBackTheDatabaseFallback locks in the round trip: when
+// the external write fails and the body lands in the database column, the read
+// path must find it. Without the read-side fallback the body is written but can
+// never be read, which is worse than not writing it at all.
+func TestLoadResponseBodyReadsBackTheDatabaseFallback(t *testing.T) {
+	client, dataStorageService, ctx := setupDataStorageTest(t)
+	t.Cleanup(func() { _ = client.Close() })
+
+	systemService := NewSystemService(SystemServiceParams{
+		CacheConfig: xcache.Config{
+			Mode:   xcache.ModeMemory,
+			Memory: xcache.MemoryConfig{Expiration: 5 * time.Minute},
+		},
+	})
+
+	service := &RequestService{
+		AbstractService:    &AbstractService{db: client},
+		SystemService:      systemService,
+		DataStorageService: dataStorageService,
+	}
+
+	// A regular file as the storage root makes directory creation fail for any user.
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+
+	unwritable := filepath.Join(blocker, "sub")
+
+	ds, err := client.DataStorage.Create().
+		SetName("fs-unwritable-readback").
+		SetDescription("fs storage whose directory cannot be created").
+		SetPrimary(false).
+		SetType(datastorage.TypeFs).
+		SetSettings(&objects.DataStorageSettings{Directory: &unwritable}).
+		SetStatus(datastorage.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	req, err := client.Request.Create().
+		SetProjectID(9).
+		SetModelID("deepseek-flash").
+		SetStatus(request.StatusProcessing).
+		SetDataStorageID(ds.ID).
+		SetRequestBody([]byte("{}")).
+		Save(ctx)
+	require.NoError(t, err)
+
+	payload := []byte(`{"roundtrip":true,"note":"written to the database, read back the same way"}`)
+
+	require.NoError(t, service.UpdateRequestCompleted(ctx, req.ID, "ext-roundtrip", payload, nil))
+
+	fresh, err := client.Request.Get(ctx, req.ID)
+	require.NoError(t, err)
+
+	got, err := service.LoadResponseBody(ctx, fresh)
+	require.NoError(t, err)
+	require.JSONEq(t, string(payload), string(got),
+		"the read path must return the database fallback instead of an empty body")
 }
