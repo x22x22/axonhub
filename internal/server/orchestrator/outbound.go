@@ -278,8 +278,11 @@ func (ts *OutboundPersistentStream) persistAggregatedResponse(ctx context.Contex
 		}
 	}
 
+	persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	err := ts.RequestService.UpdateRequestExecutionCompleted(
-		ctx,
+		persistCtx,
 		ts.requestExec.ID,
 		meta.ID,
 		responseBody,

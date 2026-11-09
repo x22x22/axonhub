@@ -35,8 +35,14 @@ func (m *persistRequestMiddleware) OnInboundLlmRequest(ctx context.Context, llmR
 		return llmRequest, nil
 	}
 
+	// Bound the insert: a saturated or locked database must not pin a connection
+	// for the whole LLM request deadline. On 2026-11-09 a locked table held 30
+	// connections and took the entire gateway down.
+	persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	request, err := m.inbound.state.RequestService.CreateRequest(
-		ctx,
+		persistCtx,
 		llmRequest,
 		m.inbound.state.RawRequest,
 		llmRequest.APIFormat,
