@@ -256,9 +256,15 @@ func (ts *OutboundPersistentStream) persistAggregatedResponse(ctx context.Contex
 		return
 	}
 
+	// Callers pass context.WithoutCancel, which carries no deadline, so the
+	// budget has to be created here and cover every write below; otherwise a
+	// locked database can hold a connection for each of them indefinitely.
+	persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	// Try to create usage log from aggregated response
 	if usage := meta.Usage; usage != nil {
-		_, err := ts.UsageLogService.CreateUsageLogFromRequest(ctx, ts.request, ts.requestExec, usage)
+		_, err := ts.UsageLogService.CreateUsageLogFromRequest(persistCtx, ts.request, ts.requestExec, usage)
 		if err != nil {
 			log.Warn(ctx, "Failed to create usage log from request", log.Cause(err))
 		}
@@ -279,7 +285,7 @@ func (ts *OutboundPersistentStream) persistAggregatedResponse(ctx context.Contex
 	}
 
 	err := ts.RequestService.UpdateRequestExecutionCompleted(
-		ctx,
+		persistCtx,
 		ts.requestExec.ID,
 		meta.ID,
 		responseBody,
@@ -294,7 +300,7 @@ func (ts *OutboundPersistentStream) persistAggregatedResponse(ctx context.Contex
 	}
 
 	// Save all response chunks at once
-	if err := ts.RequestService.SaveRequestExecutionChunks(ctx, ts.requestExec.ID, ts.responseChunks); err != nil {
+	if err := ts.RequestService.SaveRequestExecutionChunks(persistCtx, ts.requestExec.ID, ts.responseChunks); err != nil {
 		log.Warn(ctx, "Failed to save request execution chunks", log.Cause(err))
 	}
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/fx"
 
+	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/build"
+	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/server/assets"
 	"github.com/looplj/axonhub/internal/server/biz"
@@ -23,16 +26,19 @@ type SystemHandlersParams struct {
 	fx.In
 
 	SystemService *biz.SystemService
+	Client        *ent.Client
 }
 
 func NewSystemHandlers(params SystemHandlersParams) *SystemHandlers {
 	return &SystemHandlers{
 		SystemService: params.SystemService,
+		Client:        params.Client,
 	}
 }
 
 type SystemHandlers struct {
 	SystemService *biz.SystemService
+	Client        *ent.Client
 }
 
 // SystemStatusResponse 系统状态响应.
@@ -40,13 +46,31 @@ type SystemStatusResponse struct {
 	IsInitialized bool `json:"isInitialized"`
 }
 
+// HealthChecks reports the state of dependencies the gateway needs in order to
+// serve traffic.
+//
+// It is informational only: /health keeps returning 200 while the process is up,
+// because restarting a gateway never fixes an unreachable database. Readiness is
+// reported separately by /ready, which does return 503.
+type HealthChecks struct {
+	Database string `json:"database"`
+}
+
 // HealthResponse 健康检查响应.
 type HealthResponse struct {
-	Status    string     `json:"status"`
-	Timestamp time.Time  `json:"timestamp"`
-	Version   string     `json:"version"`
-	Build     build.Info `json:"build"`
-	Uptime    string     `json:"uptime"`
+	Status    string       `json:"status"`
+	Timestamp time.Time    `json:"timestamp"`
+	Version   string       `json:"version"`
+	Build     build.Info   `json:"build"`
+	Uptime    string       `json:"uptime"`
+	Checks    HealthChecks `json:"checks"`
+}
+
+// ReadyResponse 就绪检查响应.
+type ReadyResponse struct {
+	Status    string       `json:"status"`
+	Timestamp time.Time    `json:"timestamp"`
+	Checks    HealthChecks `json:"checks"`
 }
 
 // InitializeSystemRequest 系统初始化请求.
@@ -96,6 +120,61 @@ func (h *SystemHandlers) Health(c *gin.Context) {
 		Version:   build.Version,
 		Build:     buildInfo,
 		Uptime:    buildInfo.Uptime,
+		Checks:    h.dependencyChecks(c.Request.Context()),
+	})
+}
+
+// dependencyChecks probes the database with a one second budget.
+//
+// The gateway can be perfectly "alive" while every request fails because the
+// database is locked or saturated. On 2026-11-09 the database stayed locked for
+// 30 minutes while /health kept answering 200, so the outage was invisible to
+// monitoring.
+func (h *SystemHandlers) dependencyChecks(ctx context.Context) HealthChecks {
+	checks := HealthChecks{Database: "unknown"}
+
+	if h.Client == nil {
+		return checks
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+
+	// The probe runs without a request principal, so it must bypass the authz
+	// interceptor; otherwise a healthy database would be reported as an error.
+	pingCtx = authz.WithSystemBypass(pingCtx, "health-database-check")
+
+	// DataStorage is a tiny table that the request path depends on, so a count is
+	// a cheap end-to-end probe of the connection pool.
+	if _, err := h.Client.DataStorage.Query().Count(pingCtx); err != nil {
+		checks.Database = "error"
+
+		return checks
+	}
+
+	checks.Database = "ok"
+
+	return checks
+}
+
+// Ready reports readiness with a dependency check. Unlike /health it returns 503
+// when the database is unreachable, so external monitoring can alert on a gateway
+// that is up but unable to serve.
+func (h *SystemHandlers) Ready(c *gin.Context) {
+	checks := h.dependencyChecks(c.Request.Context())
+
+	status := http.StatusOK
+	state := "ready"
+
+	if checks.Database != "ok" {
+		status = http.StatusServiceUnavailable
+		state = "unavailable"
+	}
+
+	c.JSON(status, ReadyResponse{
+		Status:    state,
+		Timestamp: time.Now(),
+		Checks:    checks,
 	})
 }
 

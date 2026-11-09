@@ -75,6 +75,9 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		publicGroup.GET("/favicon", handlers.System.GetFavicon)
 		// Health check endpoint - no authentication required
 		publicGroup.GET("/health", handlers.System.Health)
+		// Readiness check endpoint - reports dependency health (503 when the
+		// database is unreachable), no authentication required
+		publicGroup.GET("/ready", handlers.System.Ready)
 	}
 
 	unSecureAdminGroup := server.Group("/admin", middleware.WithTimeout(server.Config.RequestTimeout))

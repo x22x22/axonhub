@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"time"
 
 	"github.com/looplj/axonhub/internal/dumper"
 	"github.com/looplj/axonhub/internal/ent"
@@ -13,6 +14,8 @@ import (
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
+
+	"github.com/looplj/axonhub/internal/pkg/xcontext"
 )
 
 // InboundPersistentStream wraps a stream and tracks all responses for final saving to database.
@@ -238,13 +241,16 @@ func (ts *InboundPersistentStream) _persistResponse(ctx context.Context, respons
 		}
 	}
 
-	err := ts.requestService.UpdateRequestCompleted(ctx, ts.request.ID, meta.ID, responseBody, metrics)
+	persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	err := ts.requestService.UpdateRequestCompleted(persistCtx, ts.request.ID, meta.ID, responseBody, metrics)
 	if err != nil {
 		log.Warn(ctx, "Failed to update request status to completed", log.Cause(err))
 	}
 
 	// Save all response chunks at once
-	if err := ts.requestService.SaveRequestChunks(ctx, ts.request.ID, ts.responseChunks); err != nil {
+	if err := ts.requestService.SaveRequestChunks(persistCtx, ts.request.ID, ts.responseChunks); err != nil {
 		log.Warn(ctx, "Failed to save request chunks", log.Cause(err))
 	}
 }

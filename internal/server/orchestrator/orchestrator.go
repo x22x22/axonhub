@@ -2,7 +2,7 @@ package orchestrator
 
 import (
 	"context"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/looplj/axonhub/internal/authz"
@@ -75,6 +75,7 @@ func NewChatCompletionOrchestrator(
 		failoverLoadBalancer:       failoverLoadBalancer,
 		circuitBreakerLoadBalancer: circuitBreakerLoadBalancer,
 		modelCircuitBreaker:        modelCircuitBreaker,
+		lastLoggedStrategy:         &sync.Map{},
 		proxy:                      nil,
 	}
 }
@@ -108,10 +109,17 @@ type ChatCompletionOrchestrator struct {
 	// The model circuit breaker for circuit-breaker load balancing.
 	modelCircuitBreaker *biz.ModelCircuitBreaker
 
-	// lastLoggedStrategy remembers the effective load balancing strategy that was last
-	// written to the log, so the first request after a strategy change logs it at info
-	// level without logging every request.
-	lastLoggedStrategy atomic.Value
+	// lastLoggedStrategy remembers, per API key, the effective load balancing strategy
+	// that was last written to the log, so the first request after a strategy change
+	// logs it at info level without logging every request.
+	//
+	// The strategy is derived per API key (deriveLoadBalancerStrategy), so a single
+	// shared slot made two keys on different strategies flip the recorded value on
+	// every request and log at info level each time.
+	// lastLoggedStrategy must be shared through a pointer: the With* helpers
+	// shallow-copy the orchestrator, and a sync.Map must not be copied after it
+	// has been used.
+	lastLoggedStrategy *sync.Map
 
 	// proxy is the proxy configuration for testing
 	// If set, it will override the channel's default proxy configuration
@@ -177,7 +185,12 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// Default to adaptive load balancer
 	}
 
-	processor.logStrategy(ctx, strategy, retryPolicy.LoadBalancerStrategy)
+	apiKeyID := 0
+	if apiKey != nil {
+		apiKeyID = apiKey.ID
+	}
+
+	processor.logStrategy(ctx, strategy, retryPolicy.LoadBalancerStrategy, apiKeyID)
 
 	state := &PersistenceState{
 		APIKey:                apiKey,
@@ -365,9 +378,13 @@ func newLoadBalancers(
 // logStrategy records the effective load balancing strategy. Strategy transitions are
 // logged at info level, so a profile override that silently drops trace affinity can
 // be traced from logs instead of being inferred from cache miss patterns later.
-func (processor *ChatCompletionOrchestrator) logStrategy(ctx context.Context, strategy, systemDefault string) {
-	previous, _ := processor.lastLoggedStrategy.Load().(string)
-	if previous == strategy {
+func (processor *ChatCompletionOrchestrator) logStrategy(ctx context.Context, strategy, systemDefault string, apiKeyID int) {
+	if processor.lastLoggedStrategy == nil {
+		return
+	}
+
+	previous, changed := strategyLogGate(processor.lastLoggedStrategy, apiKeyID, strategy)
+	if !changed {
 		if log.DebugEnabled(ctx) {
 			log.Debug(ctx, "chat completion load balancer strategy",
 				log.String("strategy", strategy),
@@ -378,11 +395,29 @@ func (processor *ChatCompletionOrchestrator) logStrategy(ctx context.Context, st
 		return
 	}
 
-	processor.lastLoggedStrategy.Store(strategy)
-
 	log.Info(ctx, "chat completion load balancer strategy in effect",
 		log.String("strategy", strategy),
 		log.String("system_default", systemDefault),
 		log.String("previous_strategy", previous),
+		log.Int("api_key_id", apiKeyID),
 	)
+}
+
+// strategyLogGate records the strategy for one key and reports whether it changed.
+//
+// The strategy is resolved per API key, so the bookkeeping must be per key as well:
+// with a single shared slot, two keys on different strategies alternate the value
+// and every request looks like a transition.
+func strategyLogGate(store *sync.Map, key int, strategy string) (previous string, changed bool) {
+	if v, ok := store.Load(key); ok {
+		if prev, _ := v.(string); prev == strategy {
+			return prev, false
+		}
+
+		previous, _ = v.(string)
+	}
+
+	store.Store(key, strategy)
+
+	return previous, true
 }

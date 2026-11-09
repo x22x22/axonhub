@@ -81,8 +81,13 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawRequest(ctx context.Con
 	candidate := state.ChannelModelsCandidates[state.CurrentCandidateIndex]
 	entry := candidate.Models[state.CurrentModelIndex]
 
+	// See persistRequestMiddleware: bound the write so a locked database cannot
+	// hold the connection for the whole request deadline.
+	persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	requestExec, err := state.RequestService.CreateRequestExecution(
-		ctx,
+		persistCtx,
 		channel,
 		entry.ActualModel,
 		state.Request,
@@ -95,7 +100,7 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawRequest(ctx context.Con
 
 	// Update request with channel ID after channel selection
 	if state.Request != nil && state.Request.ChannelID != channel.ID {
-		err := state.RequestService.UpdateRequestChannelID(ctx, state.Request.ID, channel.ID)
+		err := state.RequestService.UpdateRequestChannelID(persistCtx, state.Request.ID, channel.ID)
 		if err != nil {
 			return nil, err
 		}

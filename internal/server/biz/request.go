@@ -73,6 +73,89 @@ func (s *RequestService) shouldUseExternalStorage(_ context.Context, ds *ent.Dat
 	return !ds.Primary
 }
 
+// requestStorageTarget returns the data storage id and project id of a request
+// with a narrow column query.
+//
+// Request.Get selects every column, including request_body / response_body /
+// response_chunks, which live in TOAST. The completion path only needs the two
+// ids below, so selecting them keeps megabytes of body columns out of the hot
+// path (measured on the production gateway: ~6.6ms per full-row select).
+func (s *RequestService) requestStorageTarget(ctx context.Context, requestID int) (int, int, error) {
+	req, err := s.entFromContext(ctx).Request.Query().
+		Where(request.ID(requestID)).
+		Select(request.FieldDataStorageID, request.FieldProjectID).
+		Only(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return req.DataStorageID, req.ProjectID, nil
+}
+
+// executionStorageTarget is the execution-side counterpart of requestStorageTarget.
+func (s *RequestService) executionStorageTarget(ctx context.Context, executionID int) (int, int, int, error) {
+	exec, err := s.entFromContext(ctx).RequestExecution.Query().
+		Where(requestexecution.ID(executionID)).
+		Select(
+			requestexecution.FieldDataStorageID,
+			requestexecution.FieldProjectID,
+			requestexecution.FieldRequestID,
+		).
+		Only(ctx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	return exec.DataStorageID, exec.ProjectID, exec.RequestID, nil
+}
+
+// requestStorageScope returns the data storage id and project id of a request.
+//
+// entgql only selects the columns a GraphQL query actually asks for, so a field
+// resolver can be handed a partially selected entity whose data_storage_id and
+// project_id are zero. Building a storage key from those zeros silently reads
+// nothing (the resolver then returns "{}"), so the missing columns are loaded
+// with one narrow query.
+func (s *RequestService) requestStorageScope(ctx context.Context, req *ent.Request) (int, int) {
+	if req.DataStorageID != 0 && req.ProjectID != 0 {
+		return req.DataStorageID, req.ProjectID
+	}
+
+	loaded, err := s.entFromContext(ctx).Request.Query().
+		Where(request.ID(req.ID)).
+		Select(request.FieldDataStorageID, request.FieldProjectID).
+		Only(ctx)
+	if err != nil {
+		log.Warn(ctx, "Failed to resolve request storage scope", log.Cause(err), log.Int("request_id", req.ID))
+		return req.DataStorageID, req.ProjectID
+	}
+
+	return loaded.DataStorageID, loaded.ProjectID
+}
+
+// executionStorageScope returns the data storage id, project id and request id of
+// an execution. See requestStorageScope for why the columns may be missing.
+func (s *RequestService) executionStorageScope(ctx context.Context, exec *ent.RequestExecution) (int, int, int) {
+	if exec.DataStorageID != 0 && exec.ProjectID != 0 && exec.RequestID != 0 {
+		return exec.DataStorageID, exec.ProjectID, exec.RequestID
+	}
+
+	loaded, err := s.entFromContext(ctx).RequestExecution.Query().
+		Where(requestexecution.ID(exec.ID)).
+		Select(
+			requestexecution.FieldDataStorageID,
+			requestexecution.FieldProjectID,
+			requestexecution.FieldRequestID,
+		).
+		Only(ctx)
+	if err != nil {
+		log.Warn(ctx, "Failed to resolve execution storage scope", log.Cause(err), log.Int("execution_id", exec.ID))
+		return exec.DataStorageID, exec.ProjectID, exec.RequestID
+	}
+
+	return loaded.DataStorageID, loaded.ProjectID, loaded.RequestID
+}
+
 // _InvalidRequestBodyJSON returns a JSON object indicating invalid text.
 var _InvalidRequestBodyJSON = objects.JSONRawMessage(`{"message":"invalid text"}`)
 
@@ -239,8 +322,10 @@ func (s *RequestService) CreateRequest(
 
 		err := s.DataStorageService.SaveData(ctx, dataStorage, key, requestBodyBytes)
 		if err != nil {
-			log.Error(ctx, "Failed to save request body to external storage", log.Cause(err))
-			// Continue anyway, don't fail the request creation
+			// request_body is immutable in the schema, so it cannot be written back
+			// after the insert. The body is lost; log it loudly instead of failing
+			// the request, and keep the storage policy in mind when sizing disks.
+			log.Error(ctx, "Failed to save request body to external storage, the audit body is lost", log.Cause(err))
 		}
 	}
 
@@ -353,8 +438,9 @@ func (s *RequestService) CreateRequestExecution(
 
 		err := s.DataStorageService.SaveData(ctx, dataStorage, key, requestBodyBytes)
 		if err != nil {
-			log.Error(ctx, "Failed to save execution request body to external storage", log.Cause(err))
-			// Continue anyway, don't fail the execution creation
+			// See CreateRequest: request_body is immutable, so the body cannot be
+			// written back after the insert.
+			log.Error(ctx, "Failed to save execution request body to external storage, the audit body is lost", log.Cause(err))
 		}
 	}
 
@@ -386,8 +472,9 @@ func (s *RequestService) UpdateRequestCompleted(
 
 	client := s.entFromContext(ctx)
 
-	// Get the request to check data storage
-	req, err := client.Request.Get(ctx, requestID)
+	// Only the storage id is needed here; a full Request.Get would pull the body
+	// columns out of TOAST for nothing.
+	dataStorageID, projectID, err := s.requestStorageTarget(ctx, requestID)
 	if err != nil {
 		log.Error(ctx, "Failed to get request", log.Cause(err))
 		return err
@@ -395,8 +482,8 @@ func (s *RequestService) UpdateRequestCompleted(
 
 	// Get data storage if set
 	var dataStorage *ent.DataStorage
-	if req.DataStorageID != 0 {
-		dataStorage, err = s.DataStorageService.GetDataStorageByID(ctx, req.DataStorageID)
+	if dataStorageID != 0 {
+		dataStorage, err = s.DataStorageService.GetDataStorageByID(ctx, dataStorageID)
 		if err != nil {
 			log.Warn(ctx, "Failed to get data storage", log.Cause(err))
 		}
@@ -431,12 +518,12 @@ func (s *RequestService) UpdateRequestCompleted(
 		// Check if we should use external storage
 		if s.shouldUseExternalStorage(ctx, dataStorage) {
 			// Save to external storage
-			key := GenerateResponseBodyKey(req.ProjectID, requestID)
+			key := GenerateResponseBodyKey(projectID, requestID)
 
-			err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes)
-			if err != nil {
-				log.Error(ctx, "Failed to save response body to external storage", log.Cause(err))
-				// Continue anyway
+			if err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes); err != nil {
+				// Fall back to the database column so the response body is not lost.
+				log.Error(ctx, "Failed to save response body to external storage, falling back to database", log.Cause(err))
+				upd = upd.SetResponseBody(responseBodyBytes)
 			}
 		} else {
 			// Store in database
@@ -473,8 +560,9 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 
 	client := s.entFromContext(ctx)
 
-	// Get the request to check data storage
-	req, err := client.Request.Get(ctx, requestID)
+	// Only the storage id is needed here; a full Request.Get would pull the body
+	// columns out of TOAST for nothing.
+	dataStorageID, projectID, err := s.requestStorageTarget(ctx, requestID)
 	if err != nil {
 		log.Error(ctx, "Failed to get request", log.Cause(err))
 		return err
@@ -482,8 +570,8 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 
 	// Get data storage if set
 	var dataStorage *ent.DataStorage
-	if req.DataStorageID != 0 {
-		dataStorage, err = s.DataStorageService.GetDataStorageByID(ctx, req.DataStorageID)
+	if dataStorageID != 0 {
+		dataStorage, err = s.DataStorageService.GetDataStorageByID(ctx, dataStorageID)
 		if err != nil {
 			log.Warn(ctx, "Failed to get data storage", log.Cause(err))
 		}
@@ -518,12 +606,12 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 		// Check if we should use external storage
 		if s.shouldUseExternalStorage(ctx, dataStorage) {
 			// Save to external storage
-			key := GenerateResponseBodyKey(req.ProjectID, requestID)
+			key := GenerateResponseBodyKey(projectID, requestID)
 
-			err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes)
-			if err != nil {
-				log.Error(ctx, "Failed to save response body to external storage", log.Cause(err))
-				// Continue anyway
+			if err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes); err != nil {
+				// Fall back to the database column so the response body is not lost.
+				log.Error(ctx, "Failed to save response body to external storage, falling back to database", log.Cause(err))
+				upd = upd.SetResponseBody(responseBodyBytes)
 			}
 		} else {
 			// Store in database
@@ -558,8 +646,9 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 
 	client := s.entFromContext(ctx)
 
-	// Get the execution to check data storage
-	execution, err := client.RequestExecution.Get(ctx, executionID)
+	// Only the storage id is needed here; a full RequestExecution.Get would pull
+	// the body columns out of TOAST for nothing.
+	dataStorageID, projectID, requestID, err := s.executionStorageTarget(ctx, executionID)
 	if err != nil {
 		log.Error(ctx, "Failed to get request execution", log.Cause(err))
 		return err
@@ -567,8 +656,8 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 
 	// Get data storage if set
 	var dataStorage *ent.DataStorage
-	if execution.DataStorageID != 0 {
-		dataStorage, err = client.DataStorage.Get(ctx, execution.DataStorageID)
+	if dataStorageID != 0 {
+		dataStorage, err = s.DataStorageService.GetDataStorageByID(ctx, dataStorageID)
 		if err != nil {
 			log.Warn(ctx, "Failed to get data storage", log.Cause(err))
 		}
@@ -602,11 +691,12 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 		// Check if we should use external storage
 		if s.shouldUseExternalStorage(ctx, dataStorage) {
 			// Save to external storage
-			key := GenerateExecutionResponseBodyKey(execution.ProjectID, execution.RequestID, executionID)
+			key := GenerateExecutionResponseBodyKey(projectID, requestID, executionID)
 
-			err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes)
-			if err != nil {
-				log.Error(ctx, "Failed to save execution response body to external storage", log.Cause(err))
+			if err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes); err != nil {
+				// Fall back to the database column so the response body is not lost.
+				log.Error(ctx, "Failed to save execution response body to external storage, falling back to database", log.Cause(err))
+				upd = upd.SetResponseBody(responseBodyBytes)
 			}
 		} else {
 			// Store in database
@@ -836,16 +926,16 @@ func (s *RequestService) SaveRequestChunks(
 
 	client := s.entFromContext(ctx)
 
-	// Get the request to check data storage
-	req, err := client.Request.Get(ctx, requestID)
+	// Only the storage id and project id are needed here; see requestStorageTarget.
+	dataStorageID, projectID, err := s.requestStorageTarget(ctx, requestID)
 	if err != nil {
 		return fmt.Errorf("failed to get request: %w", err)
 	}
 
 	// Get data storage if set
 	var dataStorage *ent.DataStorage
-	if req.DataStorageID != 0 {
-		dataStorage, err = client.DataStorage.Get(ctx, req.DataStorageID)
+	if dataStorageID != 0 {
+		dataStorage, err = s.DataStorageService.GetDataStorageByID(ctx, dataStorageID)
 		if err != nil {
 			log.Warn(ctx, "Failed to get data storage", log.Cause(err))
 		}
@@ -853,7 +943,7 @@ func (s *RequestService) SaveRequestChunks(
 
 	// Check if we should use external storage
 	if s.shouldUseExternalStorage(ctx, dataStorage) {
-		key := GenerateResponseChunksKey(req.ProjectID, requestID)
+		key := GenerateResponseChunksKey(projectID, requestID)
 
 		allChunksBytes, err := json.Marshal(chunkBytes)
 		if err != nil {
@@ -1075,7 +1165,9 @@ func (s *RequestService) LoadRequestBody(ctx context.Context, req *ent.Request) 
 		return nil, fmt.Errorf("request is nil")
 	}
 
-	dataStorage, err := s.getDataStorage(ctx, req.DataStorageID)
+	dataStorageID, projectID := s.requestStorageScope(ctx, req)
+
+	dataStorage, err := s.getDataStorage(ctx, dataStorageID)
 	if err != nil {
 		log.Warn(ctx, "Failed to get data storage for request body", log.Cause(err), log.Int("request_id", req.ID))
 		return xjson.EmptyJSONRawMessage, nil
@@ -1089,7 +1181,7 @@ func (s *RequestService) LoadRequestBody(ctx context.Context, req *ent.Request) 
 		return req.RequestBody, nil
 	}
 
-	key := GenerateRequestBodyKey(req.ProjectID, req.ID)
+	key := GenerateRequestBodyKey(projectID, req.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
 	if err != nil {
@@ -1114,7 +1206,9 @@ func (s *RequestService) LoadResponseBody(ctx context.Context, req *ent.Request)
 		return xjson.EmptyJSONRawMessage, nil
 	}
 
-	dataStorage, err := s.getDataStorage(ctx, req.DataStorageID)
+	dataStorageID, projectID := s.requestStorageScope(ctx, req)
+
+	dataStorage, err := s.getDataStorage(ctx, dataStorageID)
 	if err != nil {
 		log.Warn(ctx, "Failed to get data storage for request response body", log.Cause(err), log.Int("request_id", req.ID))
 		return xjson.EmptyJSONRawMessage, nil
@@ -1128,15 +1222,28 @@ func (s *RequestService) LoadResponseBody(ctx context.Context, req *ent.Request)
 		return req.ResponseBody, nil
 	}
 
-	key := GenerateResponseBodyKey(req.ProjectID, req.ID)
+	key := GenerateResponseBodyKey(projectID, req.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
-	if err != nil {
+	// The write path falls back to the database column when the external
+	// storage is unavailable, so the read path must honor the same
+	// fallback; otherwise a body that was written to the database can never
+	// be read back.
+	if err != nil || len(data) == 0 {
+		if req.ResponseBody != nil {
+			return req.ResponseBody, nil
+		}
+
 		return xjson.EmptyJSONRawMessage, nil
 	}
 
 	if json.Valid(data) {
 		return objects.JSONRawMessage(data), nil
+	}
+
+	// A corrupt external payload should not hide a good database copy.
+	if req.ResponseBody != nil {
+		return req.ResponseBody, nil
 	}
 
 	return xjson.EmptyJSONRawMessage, nil
@@ -1157,7 +1264,9 @@ func (s *RequestService) LoadResponseChunks(ctx context.Context, req *ent.Reques
 		return []objects.JSONRawMessage{}, nil
 	}
 
-	dataStorage, err := s.getDataStorage(ctx, req.DataStorageID)
+	dataStorageID, projectID := s.requestStorageScope(ctx, req)
+
+	dataStorage, err := s.getDataStorage(ctx, dataStorageID)
 	if err != nil {
 		log.Warn(ctx, "Failed to get data storage for request response chunks", log.Cause(err), log.Int("request_id", req.ID))
 		return []objects.JSONRawMessage{}, nil
@@ -1167,7 +1276,7 @@ func (s *RequestService) LoadResponseChunks(ctx context.Context, req *ent.Reques
 		return req.ResponseChunks, nil
 	}
 
-	key := GenerateResponseChunksKey(req.ProjectID, req.ID)
+	key := GenerateResponseChunksKey(projectID, req.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
 	if err != nil {
@@ -1195,7 +1304,9 @@ func (s *RequestService) LoadRequestExecutionRequestBody(ctx context.Context, ex
 		return nil, fmt.Errorf("request execution is nil")
 	}
 
-	dataStorage, err := s.getDataStorage(ctx, exec.DataStorageID)
+	dataStorageID, projectID, requestID := s.executionStorageScope(ctx, exec)
+
+	dataStorage, err := s.getDataStorage(ctx, dataStorageID)
 	if err != nil {
 		log.Warn(ctx, "Failed to get data storage for execution request body", log.Cause(err), log.Int("execution_id", exec.ID))
 		return xjson.EmptyJSONRawMessage, nil
@@ -1209,7 +1320,7 @@ func (s *RequestService) LoadRequestExecutionRequestBody(ctx context.Context, ex
 		return exec.RequestBody, nil
 	}
 
-	key := GenerateExecutionRequestBodyKey(exec.ProjectID, exec.RequestID, exec.ID)
+	key := GenerateExecutionRequestBodyKey(projectID, requestID, exec.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
 	if err != nil {
@@ -1234,7 +1345,9 @@ func (s *RequestService) LoadRequestExecutionResponseBody(ctx context.Context, e
 		return xjson.EmptyJSONRawMessage, nil
 	}
 
-	dataStorage, err := s.getDataStorage(ctx, exec.DataStorageID)
+	dataStorageID, projectID, requestID := s.executionStorageScope(ctx, exec)
+
+	dataStorage, err := s.getDataStorage(ctx, dataStorageID)
 	if err != nil {
 		log.Warn(ctx, "Failed to get data storage for execution response body", log.Cause(err), log.Int("execution_id", exec.ID))
 		return xjson.EmptyJSONRawMessage, nil
@@ -1248,15 +1361,28 @@ func (s *RequestService) LoadRequestExecutionResponseBody(ctx context.Context, e
 		return exec.ResponseBody, nil
 	}
 
-	key := GenerateExecutionResponseBodyKey(exec.ProjectID, exec.RequestID, exec.ID)
+	key := GenerateExecutionResponseBodyKey(projectID, requestID, exec.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
-	if err != nil {
+	// The write path falls back to the database column when the external
+	// storage is unavailable, so the read path must honor the same
+	// fallback; otherwise a body that was written to the database can never
+	// be read back.
+	if err != nil || len(data) == 0 {
+		if exec.ResponseBody != nil {
+			return exec.ResponseBody, nil
+		}
+
 		return xjson.EmptyJSONRawMessage, nil
 	}
 
 	if json.Valid(data) {
 		return objects.JSONRawMessage(data), nil
+	}
+
+	// A corrupt external payload should not hide a good database copy.
+	if exec.ResponseBody != nil {
+		return exec.ResponseBody, nil
 	}
 
 	return xjson.EmptyJSONRawMessage, nil
@@ -1278,7 +1404,9 @@ func (s *RequestService) LoadRequestExecutionResponseChunks(ctx context.Context,
 		return []objects.JSONRawMessage{}, nil
 	}
 
-	dataStorage, err := s.getDataStorage(ctx, exec.DataStorageID)
+	dataStorageID, projectID, requestID := s.executionStorageScope(ctx, exec)
+
+	dataStorage, err := s.getDataStorage(ctx, dataStorageID)
 	if err != nil {
 		log.Warn(ctx, "Failed to get data storage for execution response chunks", log.Cause(err), log.Int("execution_id", exec.ID))
 		return []objects.JSONRawMessage{}, nil
@@ -1288,7 +1416,7 @@ func (s *RequestService) LoadRequestExecutionResponseChunks(ctx context.Context,
 		return exec.ResponseChunks, nil
 	}
 
-	key := GenerateExecutionResponseChunksKey(exec.ProjectID, exec.RequestID, exec.ID)
+	key := GenerateExecutionResponseChunksKey(projectID, requestID, exec.ID)
 
 	data, err := s.DataStorageService.LoadData(ctx, dataStorage, key)
 	if err != nil {
