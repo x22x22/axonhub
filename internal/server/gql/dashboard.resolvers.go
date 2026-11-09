@@ -53,21 +53,34 @@ func (r *queryResolver) dashboardOverviewUncached(ctx context.Context) (*Dashboa
 	}
 
 	// Get total and failed requests in a single query by status grouping
-	var statusCounts []struct {
-		Status request.Status `json:"status"`
-		Count  int            `json:"count"`
+	var statusCounts []requestStatusCount
+
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewCounts, viewErr := r.dashboardOverviewFromViews(ctx)
+		if viewErr != nil {
+			log.Warn(ctx, "failed to count requests by status from stats views, falling back to detail",
+				log.Cause(viewErr))
+
+			useViews = false
+		} else {
+			statusCounts = viewCounts
+		}
 	}
-	if err := r.client.Request.Query().
-		GroupBy(request.FieldStatus).
-		Aggregate(ent.Count()).
-		Scan(ctx, &statusCounts); err != nil {
-		log.Warn(ctx, "failed to count requests by status", log.Cause(err))
-	} else {
-		for _, sc := range statusCounts {
-			stats.TotalRequests += sc.Count
-			if sc.Status == request.StatusFailed {
-				stats.FailedRequests = sc.Count
-			}
+
+	if !useViews {
+		if err := r.client.Request.Query().
+			GroupBy(request.FieldStatus).
+			Aggregate(ent.Count()).
+			Scan(ctx, &statusCounts); err != nil {
+			log.Warn(ctx, "failed to count requests by status", log.Cause(err))
+		}
+	}
+
+	for _, sc := range statusCounts {
+		stats.TotalRequests += sc.Count
+		if sc.Status == request.StatusFailed {
+			stats.FailedRequests = sc.Count
 		}
 	}
 
@@ -362,49 +375,56 @@ func (r *queryResolver) tokenStatsByAPIKeyUncached(ctx context.Context, timeWind
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type tokenStats struct {
-		APIKeyID        int   `json:"api_key_id"`
-		InputTokens     int64 `json:"input_tokens"`
-		OutputTokens    int64 `json:"output_tokens"`
-		CachedTokens    int64 `json:"cached_tokens"`
-		ReasoningTokens int64 `json:"reasoning_tokens"`
-	}
-
 	var results []tokenStats
 
-	// Database-level aggregation with JOIN
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			// Join to requests table to get api_key_id
-			requestTable := sql.Table(request.Table)
-			s.Join(requestTable).On(
-				s.C(usagelog.FieldRequestID),
-				requestTable.C(request.FieldID),
-			)
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.tokenStatsByAPIKeyFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read token stats by API key from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			// Filter: only requests with non-null api_key_id
-			s.Where(sql.NotNull(requestTable.C(request.FieldAPIKeyID)))
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			// Apply time window filter when provided
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+	if !useViews {
+		// Database-level aggregation with JOIN
+		err := r.client.UsageLog.Query().
+			Modify(func(s *sql.Selector) {
+				// Join to requests table to get api_key_id
+				requestTable := sql.Table(request.Table)
+				s.Join(requestTable).On(
+					s.C(usagelog.FieldRequestID),
+					requestTable.C(request.FieldID),
+				)
 
-			// Group by api_key_id
-			s.GroupBy(requestTable.C(request.FieldAPIKeyID))
+				// Filter: only requests with non-null api_key_id
+				s.Where(sql.NotNull(requestTable.C(request.FieldAPIKeyID)))
 
-			// Select aggregations
-			s.Select(
-				sql.As(requestTable.C(request.FieldAPIKeyID), "api_key_id"),
-				sql.As(sql.Sum(s.C(usagelog.FieldPromptTokens)), "input_tokens"),
-				sql.As(sql.Sum(s.C(usagelog.FieldCompletionTokens)), "output_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionReasoningTokens)), "reasoning_tokens"),
-			)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tokens by API key: %w", err)
+				// Apply time window filter when provided
+				if applyFilter {
+					s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
+				}
+
+				// Group by api_key_id
+				s.GroupBy(requestTable.C(request.FieldAPIKeyID))
+
+				// Select aggregations
+				s.Select(
+					sql.As(requestTable.C(request.FieldAPIKeyID), "api_key_id"),
+					sql.As(sql.Sum(s.C(usagelog.FieldPromptTokens)), "input_tokens"),
+					sql.As(sql.Sum(s.C(usagelog.FieldCompletionTokens)), "output_tokens"),
+					sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
+					sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionReasoningTokens)), "reasoning_tokens"),
+				)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get tokens by API key: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
@@ -1535,15 +1555,35 @@ func (r *queryResolver) tokenStatsByChannelUncached(ctx context.Context, timeWin
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type channelTokenStats struct {
-		ChannelName     string `json:"channel_name"`
-		InputTokens     int64  `json:"input_tokens"`
-		OutputTokens    int64  `json:"output_tokens"`
-		CachedTokens    int64  `json:"cached_tokens"`
-		ReasoningTokens int64  `json:"reasoning_tokens"`
+	var results []channelTokenStats
+
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.tokenStatsByChannelFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read token stats by channel from stats views, falling back to detail tables",
+				log.Cause(viewErr))
+
+			useViews = false
+		} else {
+			results = viewResults
+		}
 	}
 
-	var results []channelTokenStats
+	if useViews {
+		return lo.Map(results, func(item channelTokenStats, _ int) *TokenStatsByChannel {
+			totalTokens := item.InputTokens + item.OutputTokens + item.ReasoningTokens
+
+			return &TokenStatsByChannel{
+				ChannelName:     item.ChannelName,
+				InputTokens:     int(item.InputTokens),
+				OutputTokens:    int(item.OutputTokens),
+				CachedTokens:    int(item.CachedTokens),
+				ReasoningTokens: int(item.ReasoningTokens),
+				TotalTokens:     int(totalTokens),
+			}
+		}), nil
+	}
 
 	err := r.client.UsageLog.Query().
 		Modify(func(s *sql.Selector) {
@@ -1666,12 +1706,29 @@ func (r *queryResolver) costStatsByChannelUncached(ctx context.Context, timeWind
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type channelCostStats struct {
-		ChannelName string  `json:"channel_name"`
-		Cost        float64 `json:"total_cost"`
+	var results []channelCostStats
+
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.costStatsByChannelFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read cost stats by channel from stats views, falling back to detail tables",
+				log.Cause(viewErr))
+
+			useViews = false
+		} else {
+			results = viewResults
+		}
 	}
 
-	var results []channelCostStats
+	if useViews {
+		return lo.Map(results, func(item channelCostStats, _ int) *CostStatsByChannel {
+			return &CostStatsByChannel{
+				ChannelName: item.ChannelName,
+				Cost:        item.Cost,
+			}
+		}), nil
+	}
 
 	err := r.client.UsageLog.Query().
 		Modify(func(s *sql.Selector) {

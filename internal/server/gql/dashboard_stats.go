@@ -9,6 +9,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 
+	"github.com/looplj/axonhub/internal/ent/request"
 	"github.com/looplj/axonhub/internal/log"
 )
 
@@ -293,6 +294,226 @@ LIMIT 10`
 	for rows.Next() {
 		var stat channelStats
 		if scanErr := rows.Scan(&stat.ChannelName, &stat.Count); scanErr != nil {
+			return nil, scanErr
+		}
+
+		results = append(results, stat)
+	}
+
+	return results, rows.Err()
+}
+
+// channelTokenStats is the per-channel token totals.
+type channelTokenStats struct {
+	ChannelName     string `json:"channel_name"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+}
+
+// channelCostStats is the per-channel cost sum.
+type channelCostStats struct {
+	ChannelName string  `json:"channel_name"`
+	Cost        float64 `json:"total_cost"`
+}
+
+const channelStatsUnion = `
+    SELECT channel_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens, total_cost
+    FROM usage_stats_daily
+    WHERE day < current_date AND channel_id <> 0
+      AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
+    UNION ALL
+    SELECT channel_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens, total_cost
+    FROM usage_logs
+    WHERE channel_id IS NOT NULL AND created_at >= current_date
+      AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)`
+
+func (r *queryResolver) tokenStatsByChannelFromViews(ctx context.Context, since time.Time, applyFilter bool) ([]channelTokenStats, error) {
+	db, ok := r.statsDatabase()
+	if !ok {
+		return nil, errStatsDatabaseUnavailable
+	}
+
+	query := `
+SELECT c.name AS channel_name,
+       COALESCE(SUM(x.prompt_tokens), 0)::bigint                 AS input_tokens,
+       COALESCE(SUM(x.completion_tokens), 0)::bigint             AS output_tokens,
+       COALESCE(SUM(x.prompt_cached_tokens), 0)::bigint          AS cached_tokens,
+       COALESCE(SUM(x.completion_reasoning_tokens), 0)::bigint   AS reasoning_tokens
+FROM (` + channelStatsUnion + `
+) x
+JOIN channels c ON c.id = x.channel_id AND c.deleted_at = 0
+GROUP BY c.name
+ORDER BY COALESCE(SUM(x.prompt_tokens), 0) + COALESCE(SUM(x.completion_tokens), 0) + COALESCE(SUM(x.completion_reasoning_tokens), 0) DESC
+LIMIT 10`
+
+	var arg any
+	if applyFilter {
+		arg = since
+	}
+
+	rows, err := db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]channelTokenStats, 0, 10)
+
+	for rows.Next() {
+		var stat channelTokenStats
+		if scanErr := rows.Scan(&stat.ChannelName, &stat.InputTokens, &stat.OutputTokens,
+			&stat.CachedTokens, &stat.ReasoningTokens); scanErr != nil {
+			return nil, scanErr
+		}
+
+		results = append(results, stat)
+	}
+
+	return results, rows.Err()
+}
+
+func (r *queryResolver) costStatsByChannelFromViews(ctx context.Context, since time.Time, applyFilter bool) ([]channelCostStats, error) {
+	db, ok := r.statsDatabase()
+	if !ok {
+		return nil, errStatsDatabaseUnavailable
+	}
+
+	query := `
+SELECT c.name AS channel_name, COALESCE(SUM(x.total_cost), 0) AS total_cost
+FROM (` + channelStatsUnion + `
+) x
+JOIN channels c ON c.id = x.channel_id AND c.deleted_at = 0
+GROUP BY c.name
+ORDER BY total_cost DESC
+LIMIT 10`
+
+	var arg any
+	if applyFilter {
+		arg = since
+	}
+
+	rows, err := db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]channelCostStats, 0, 10)
+
+	for rows.Next() {
+		var stat channelCostStats
+		if scanErr := rows.Scan(&stat.ChannelName, &stat.Cost); scanErr != nil {
+			return nil, scanErr
+		}
+
+		results = append(results, stat)
+	}
+
+	return results, rows.Err()
+}
+
+// tokenStats is the per-API-key token totals.
+type tokenStats struct {
+	APIKeyID        int   `json:"api_key_id"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+}
+
+// requestStatusCount is the per-status request counter.
+type requestStatusCount struct {
+	Status request.Status `json:"status"`
+	Count  int            `json:"count"`
+}
+
+func (r *queryResolver) dashboardOverviewFromViews(ctx context.Context) ([]requestStatusCount, error) {
+	db, ok := r.statsDatabase()
+	if !ok {
+		return nil, errStatsDatabaseUnavailable
+	}
+
+	query := `
+SELECT status, COALESCE(SUM(request_count), 0)::bigint AS count
+FROM (
+    SELECT status, request_count
+    FROM request_stats_daily
+    WHERE day < current_date
+    UNION ALL
+    SELECT status, COUNT(*)::bigint
+    FROM requests
+    WHERE created_at >= current_date
+    GROUP BY status
+) x
+GROUP BY status`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]requestStatusCount, 0, 8)
+
+	for rows.Next() {
+		var stat requestStatusCount
+
+		var status string
+		if scanErr := rows.Scan(&status, &stat.Count); scanErr != nil {
+			return nil, scanErr
+		}
+
+		stat.Status = request.Status(status)
+		results = append(results, stat)
+	}
+
+	return results, rows.Err()
+}
+
+func (r *queryResolver) tokenStatsByAPIKeyFromViews(ctx context.Context, since time.Time, applyFilter bool) ([]tokenStats, error) {
+	db, ok := r.statsDatabase()
+	if !ok {
+		return nil, errStatsDatabaseUnavailable
+	}
+
+	query := `
+SELECT api_key_id,
+       COALESCE(SUM(prompt_tokens), 0)::bigint               AS input_tokens,
+       COALESCE(SUM(completion_tokens), 0)::bigint           AS output_tokens,
+       COALESCE(SUM(prompt_cached_tokens), 0)::bigint        AS cached_tokens,
+       COALESCE(SUM(completion_reasoning_tokens), 0)::bigint AS reasoning_tokens
+FROM (
+    SELECT api_key_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens
+    FROM usage_stats_daily
+    WHERE day < current_date AND api_key_id <> 0
+      AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
+    UNION ALL
+    SELECT api_key_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens
+    FROM usage_logs
+    WHERE api_key_id IS NOT NULL AND created_at >= current_date
+      AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
+) x
+GROUP BY api_key_id`
+
+	var arg any
+	if applyFilter {
+		arg = since
+	}
+
+	rows, err := db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]tokenStats, 0, 16)
+
+	for rows.Next() {
+		var stat tokenStats
+		if scanErr := rows.Scan(&stat.APIKeyID, &stat.InputTokens, &stat.OutputTokens,
+			&stat.CachedTokens, &stat.ReasoningTokens); scanErr != nil {
 			return nil, scanErr
 		}
 
