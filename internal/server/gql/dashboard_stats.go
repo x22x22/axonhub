@@ -136,3 +136,168 @@ GROUP BY channel_id`
 
 	return results, rows.Err()
 }
+
+// apiKeyStats is the per-API-key request counter.
+type apiKeyStats struct {
+	APIKeyID int `json:"api_key_id"`
+	Count    int `json:"request_count"`
+}
+
+// apiKeyCostStats is the per-API-key cost sum.
+type apiKeyCostStats struct {
+	APIKeyID int     `json:"api_key_id"`
+	Cost     float64 `json:"total_cost"`
+}
+
+func (r *queryResolver) requestStatsByAPIKeyFromViews(ctx context.Context, since time.Time, applyFilter bool) ([]apiKeyStats, error) {
+	db, ok := r.statsDatabase()
+	if !ok {
+		return nil, errStatsDatabaseUnavailable
+	}
+
+	query := `
+SELECT api_key_id, COALESCE(SUM(request_count), 0)::bigint AS request_count
+FROM (
+    SELECT api_key_id, request_count
+    FROM usage_stats_daily
+    WHERE day < current_date AND api_key_id <> 0
+      AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
+    UNION ALL
+    SELECT api_key_id, COUNT(*)::bigint
+    FROM usage_logs
+    WHERE api_key_id IS NOT NULL AND created_at >= current_date
+      AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
+    GROUP BY api_key_id
+) x
+GROUP BY api_key_id`
+
+	var arg any
+	if applyFilter {
+		arg = since
+	}
+
+	rows, err := db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]apiKeyStats, 0, 16)
+
+	for rows.Next() {
+		var stat apiKeyStats
+		if scanErr := rows.Scan(&stat.APIKeyID, &stat.Count); scanErr != nil {
+			return nil, scanErr
+		}
+
+		results = append(results, stat)
+	}
+
+	return results, rows.Err()
+}
+
+func (r *queryResolver) costStatsByAPIKeyFromViews(ctx context.Context, since time.Time, applyFilter bool) ([]apiKeyCostStats, error) {
+	db, ok := r.statsDatabase()
+	if !ok {
+		return nil, errStatsDatabaseUnavailable
+	}
+
+	query := `
+SELECT api_key_id, COALESCE(SUM(total_cost), 0) AS total_cost
+FROM (
+    SELECT api_key_id, total_cost
+    FROM usage_stats_daily
+    WHERE day < current_date AND api_key_id <> 0
+      AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
+    UNION ALL
+    SELECT api_key_id, total_cost
+    FROM usage_logs
+    WHERE api_key_id IS NOT NULL AND created_at >= current_date
+      AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
+) x
+GROUP BY api_key_id
+ORDER BY total_cost DESC
+LIMIT 10`
+
+	var arg any
+	if applyFilter {
+		arg = since
+	}
+
+	rows, err := db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]apiKeyCostStats, 0, 10)
+
+	for rows.Next() {
+		var stat apiKeyCostStats
+		if scanErr := rows.Scan(&stat.APIKeyID, &stat.Cost); scanErr != nil {
+			return nil, scanErr
+		}
+
+		results = append(results, stat)
+	}
+
+	return results, rows.Err()
+}
+
+// channelStats is the per-channel request counter with the channel display name.
+type channelStats struct {
+	ChannelName string `json:"channel_name"`
+	Count       int    `json:"count"`
+}
+
+// requestStatsByChannelFromViews reads per-channel request counts from the daily
+// aggregate plus today's detail, joining channels for the display name.
+func (r *queryResolver) requestStatsByChannelFromViews(ctx context.Context, since time.Time, applyFilter bool) ([]channelStats, error) {
+	db, ok := r.statsDatabase()
+	if !ok {
+		return nil, errStatsDatabaseUnavailable
+	}
+
+	query := `
+SELECT c.name AS channel_name, COALESCE(SUM(x.request_count), 0)::bigint AS count
+FROM (
+    SELECT channel_id, request_count
+    FROM usage_stats_daily
+    WHERE day < current_date AND channel_id <> 0
+      AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
+    UNION ALL
+    SELECT channel_id, COUNT(*)::bigint
+    FROM usage_logs
+    WHERE channel_id IS NOT NULL AND created_at >= current_date
+      AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
+    GROUP BY channel_id
+) x
+JOIN channels c ON c.id = x.channel_id AND c.deleted_at = 0
+GROUP BY c.name
+ORDER BY count DESC
+LIMIT 10`
+
+	var arg any
+	if applyFilter {
+		arg = since
+	}
+
+	rows, err := db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]channelStats, 0, 10)
+
+	for rows.Next() {
+		var stat channelStats
+		if scanErr := rows.Scan(&stat.ChannelName, &stat.Count); scanErr != nil {
+			return nil, scanErr
+		}
+
+		results = append(results, stat)
+	}
+
+	return results, rows.Err()
+}

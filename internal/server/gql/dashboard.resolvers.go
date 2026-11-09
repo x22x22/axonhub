@@ -143,46 +143,55 @@ func (r *queryResolver) requestStatsByChannelUncached(ctx context.Context, timeW
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	// Use efficient aggregation query with JOIN to get channel details and filter out deleted channels
-	type channelStats struct {
-		ChannelName string `json:"channel_name"`
-		Count       int    `json:"count"`
-	}
-
 	var results []channelStats
 
-	// Aggregate by channel directly in the database using usage_logs table joined with channels
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			channelTable := sql.Table(channel.Table)
-			s.Join(channelTable).On(
-				s.C(usagelog.FieldChannelID),
-				channelTable.C(channel.FieldID),
-			)
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.requestStatsByChannelFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read request stats by channel from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			// Filter: only non-deleted channels
-			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			// Apply time window filter when provided
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+	if !useViews {
+		// Aggregate by channel directly in the database using usage_logs table joined with channels
+		err := r.client.UsageLog.Query().
+			Modify(func(s *sql.Selector) {
+				channelTable := sql.Table(channel.Table)
+				s.Join(channelTable).On(
+					s.C(usagelog.FieldChannelID),
+					channelTable.C(channel.FieldID),
+				)
 
-			// Group by channel fields to get names and types directly
-			s.GroupBy(channelTable.C(channel.FieldName))
+				// Filter: only non-deleted channels
+				s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
 
-			// Select fields: channel name, type and the count of logs
-			s.Select(
-				sql.As(channelTable.C(channel.FieldName), "channel_name"),
-				sql.As(sql.Count(s.C(usagelog.FieldID)), "count"),
-			)
+				// Apply time window filter when provided
+				if applyFilter {
+					s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
+				}
 
-			// Order by count descending and limit to top 10
-			s.OrderBy(sql.Desc("count")).Limit(10)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get requests by channel: %w", err)
+				// Group by channel fields to get names and types directly
+				s.GroupBy(channelTable.C(channel.FieldName))
+
+				// Select fields: channel name, type and the count of logs
+				s.Select(
+					sql.As(channelTable.C(channel.FieldName), "channel_name"),
+					sql.As(sql.Count(s.C(usagelog.FieldID)), "count"),
+				)
+
+				// Order by count descending and limit to top 10
+				s.OrderBy(sql.Desc("count")).Limit(10)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get requests by channel: %w", err)
+		}
 	}
 
 	// Build response directly from aggregated results
@@ -258,28 +267,37 @@ func (r *queryResolver) requestStatsByAPIKeyUncached(ctx context.Context, timeWi
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type apiKeyStats struct {
-		APIKeyID int `json:"api_key_id"`
-		Count    int `json:"request_count"`
-	}
-
 	var results []apiKeyStats
 
-	// Database-level aggregation
-	query := r.client.UsageLog.Query().
-		Where(usagelog.APIKeyIDNotNil())
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.requestStatsByAPIKeyFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read request stats by API key from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-	// Apply time window filter when provided
-	if applyFilter {
-		query = query.Where(usagelog.CreatedAtGTE(since))
+			useViews = false
+		} else {
+			results = viewResults
+		}
 	}
 
-	err := query.
-		GroupBy(usagelog.FieldAPIKeyID).
-		Aggregate(ent.As(ent.Count(), "request_count")).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get requests by API key: %w", err)
+	if !useViews {
+		query := r.client.UsageLog.Query().
+			Where(usagelog.APIKeyIDNotNil())
+
+		// Apply time window filter when provided
+		if applyFilter {
+			query = query.Where(usagelog.CreatedAtGTE(since))
+		}
+
+		err := query.
+			GroupBy(usagelog.FieldAPIKeyID).
+			Aggregate(ent.As(ent.Count(), "request_count")).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get requests by API key: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
@@ -1749,34 +1767,44 @@ func (r *queryResolver) costStatsByAPIKeyUncached(ctx context.Context, timeWindo
 
 	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type apiKeyCostStats struct {
-		APIKeyID int     `json:"api_key_id"`
-		Cost     float64 `json:"total_cost"`
-	}
-
 	var results []apiKeyCostStats
 
-	err := r.client.UsageLog.Query().
-		Where(usagelog.APIKeyIDNotNil()).
-		Modify(func(s *sql.Selector) {
-			// Apply time window filtering
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.costStatsByAPIKeyFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read cost stats by API key from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			s.GroupBy(s.C(usagelog.FieldAPIKeyID))
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			s.Select(
-				s.C(usagelog.FieldAPIKeyID),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
-			)
+	if !useViews {
+		err := r.client.UsageLog.Query().
+			Where(usagelog.APIKeyIDNotNil()).
+			Modify(func(s *sql.Selector) {
+				// Apply time window filtering
+				if applyFilter {
+					s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
+				}
 
-			s.OrderBy(sql.Desc("total_cost"))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cost by API key: %w", err)
+				s.GroupBy(s.C(usagelog.FieldAPIKeyID))
+
+				s.Select(
+					s.C(usagelog.FieldAPIKeyID),
+					sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
+				)
+
+				s.OrderBy(sql.Desc("total_cost"))
+				s.Limit(10)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get cost by API key: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
