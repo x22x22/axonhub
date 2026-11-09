@@ -929,34 +929,46 @@ func (r *queryResolver) channelSuccessRatesUncached(ctx context.Context, timeWin
 		limitCount = *limit
 	}
 
-	type channelExecutionStats struct {
-		ChannelID    int `json:"channel_id"`
-		SuccessCount int `json:"success_count"`
-		FailedCount  int `json:"failed_count"`
-	}
-
 	var results []channelExecutionStats
 
-	// Use raw SQL to aggregate execution stats by channel
-	err := r.client.RequestExecution.Query().
-		Modify(func(s *sql.Selector) {
-			s.Select(
-				requestexecution.FieldChannelID,
-				sql.As("SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)", "success_count"),
-				sql.As("SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)", "failed_count"),
-			).
-				Where(sql.NotNull(requestexecution.FieldChannelID))
+	// Prefer the daily aggregate; it is ~80,000x faster than scanning
+	// request_executions (1.2TB of toast). "Today" still comes from the detail
+	// table so the numbers are live.
+	useViews := r.dashboardStatsViewsAvailable(ctx)
+	if useViews {
+		viewResults, viewErr := r.channelSuccessRatesFromViews(ctx, since, applyFilter)
+		if viewErr != nil {
+			log.Warn(ctx, "Failed to read channel success rates from stats views, falling back to detail tables",
+				log.Cause(viewErr))
 
-			// Apply time filter
-			if applyFilter {
-				s.Where(sql.GTE(s.C(requestexecution.FieldCreatedAt), since))
-			}
+			useViews = false
+		} else {
+			results = viewResults
+		}
+	}
 
-			s.GroupBy(requestexecution.FieldChannelID)
-		}).
-		Scan(ctx, &results)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get channel execution stats: %w", err)
+	if !useViews {
+		// Use raw SQL to aggregate execution stats by channel
+		err := r.client.RequestExecution.Query().
+			Modify(func(s *sql.Selector) {
+				s.Select(
+					requestexecution.FieldChannelID,
+					sql.As("SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)", "success_count"),
+					sql.As("SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)", "failed_count"),
+				).
+					Where(sql.NotNull(requestexecution.FieldChannelID))
+
+				// Apply time filter
+				if applyFilter {
+					s.Where(sql.GTE(s.C(requestexecution.FieldCreatedAt), since))
+				}
+
+				s.GroupBy(requestexecution.FieldChannelID)
+			}).
+			Scan(ctx, &results)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get channel execution stats: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
