@@ -20,7 +20,7 @@
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS usage_stats_daily AS
 SELECT
-  date_trunc('day', created_at)::date                    AS day,
+  date_trunc('day', created_at AT TIME ZONE 'UTC')::date                    AS day,
   COALESCE(project_id, 0)                                AS project_id,
   COALESCE(api_key_id, 0)                                AS api_key_id,
   COALESCE(channel_id, 0)                                AS channel_id,
@@ -41,7 +41,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS usage_stats_daily_pk
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS request_stats_daily AS
 SELECT
-  date_trunc('day', created_at)::date                       AS day,
+  date_trunc('day', created_at AT TIME ZONE 'UTC')::date                       AS day,
   COALESCE(project_id, 0)                                   AS project_id,
   COALESCE(channel_id, 0)                                   AS channel_id,
   COALESCE(model_id, '')                                    AS model_id,
@@ -63,7 +63,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS request_stats_daily_pk
 -- 0.34ms against this view.
 CREATE MATERIALIZED VIEW IF NOT EXISTS execution_stats_daily AS
 SELECT
-  date_trunc('day', created_at)::date               AS day,
+  date_trunc('day', created_at AT TIME ZONE 'UTC')::date               AS day,
   COALESCE(project_id, 0)                           AS project_id,
   COALESCE(channel_id, 0)                           AS channel_id,
   COALESCE(model_id, '')                            AS model_id,

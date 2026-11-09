@@ -98,7 +98,7 @@ SELECT channel_id,
 FROM (
     SELECT channel_id, success_count, failed_count
     FROM execution_stats_daily
-    WHERE day < current_date
+    WHERE day < (now() AT TIME ZONE 'UTC')::date
       AND channel_id <> 0
       AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
     UNION ALL
@@ -107,7 +107,7 @@ FROM (
            COUNT(*) FILTER (WHERE status = 'failed')::bigint
     FROM request_executions
     WHERE channel_id IS NOT NULL
-      AND created_at >= current_date
+      AND created_at >= (now() AT TIME ZONE 'UTC')::date
       AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
     GROUP BY channel_id
 ) x
@@ -161,12 +161,12 @@ SELECT api_key_id, COALESCE(SUM(request_count), 0)::bigint AS request_count
 FROM (
     SELECT api_key_id, request_count
     FROM usage_stats_daily
-    WHERE day < current_date AND api_key_id <> 0
+    WHERE day < (now() AT TIME ZONE 'UTC')::date AND api_key_id <> 0
       AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
     UNION ALL
     SELECT api_key_id, COUNT(*)::bigint
     FROM usage_logs
-    WHERE api_key_id IS NOT NULL AND created_at >= current_date
+    WHERE api_key_id IS NOT NULL AND created_at >= (now() AT TIME ZONE 'UTC')::date
       AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
     GROUP BY api_key_id
 ) x
@@ -208,12 +208,12 @@ SELECT api_key_id, COALESCE(SUM(total_cost), 0) AS total_cost
 FROM (
     SELECT api_key_id, total_cost
     FROM usage_stats_daily
-    WHERE day < current_date AND api_key_id <> 0
+    WHERE day < (now() AT TIME ZONE 'UTC')::date AND api_key_id <> 0
       AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
     UNION ALL
     SELECT api_key_id, total_cost
     FROM usage_logs
-    WHERE api_key_id IS NOT NULL AND created_at >= current_date
+    WHERE api_key_id IS NOT NULL AND created_at >= (now() AT TIME ZONE 'UTC')::date
       AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
 ) x
 GROUP BY api_key_id
@@ -264,12 +264,12 @@ SELECT c.name AS channel_name, COALESCE(SUM(x.request_count), 0)::bigint AS coun
 FROM (
     SELECT channel_id, request_count
     FROM usage_stats_daily
-    WHERE day < current_date AND channel_id <> 0
+    WHERE day < (now() AT TIME ZONE 'UTC')::date AND channel_id <> 0
       AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
     UNION ALL
     SELECT channel_id, COUNT(*)::bigint
     FROM usage_logs
-    WHERE channel_id IS NOT NULL AND created_at >= current_date
+    WHERE channel_id IS NOT NULL AND created_at >= (now() AT TIME ZONE 'UTC')::date
       AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
     GROUP BY channel_id
 ) x
@@ -321,12 +321,12 @@ type channelCostStats struct {
 const channelStatsUnion = `
     SELECT channel_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens, total_cost
     FROM usage_stats_daily
-    WHERE day < current_date AND channel_id <> 0
+    WHERE day < (now() AT TIME ZONE 'UTC')::date AND channel_id <> 0
       AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
     UNION ALL
     SELECT channel_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens, total_cost
     FROM usage_logs
-    WHERE channel_id IS NOT NULL AND created_at >= current_date
+    WHERE channel_id IS NOT NULL AND created_at >= (now() AT TIME ZONE 'UTC')::date
       AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)`
 
 func (r *queryResolver) tokenStatsByChannelFromViews(ctx context.Context, since time.Time, applyFilter bool) ([]channelTokenStats, error) {
@@ -440,11 +440,11 @@ SELECT status, COALESCE(SUM(request_count), 0)::bigint AS count
 FROM (
     SELECT status, request_count
     FROM request_stats_daily
-    WHERE day < current_date
+    WHERE day < (now() AT TIME ZONE 'UTC')::date
     UNION ALL
     SELECT status, COUNT(*)::bigint
     FROM requests
-    WHERE created_at >= current_date
+    WHERE created_at >= (now() AT TIME ZONE 'UTC')::date
     GROUP BY status
 ) x
 GROUP BY status`
@@ -487,12 +487,12 @@ SELECT api_key_id,
 FROM (
     SELECT api_key_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens
     FROM usage_stats_daily
-    WHERE day < current_date AND api_key_id <> 0
+    WHERE day < (now() AT TIME ZONE 'UTC')::date AND api_key_id <> 0
       AND ($1::timestamptz IS NULL OR day >= ($1::timestamptz)::date)
     UNION ALL
     SELECT api_key_id, prompt_tokens, completion_tokens, prompt_cached_tokens, completion_reasoning_tokens
     FROM usage_logs
-    WHERE api_key_id IS NOT NULL AND created_at >= current_date
+    WHERE api_key_id IS NOT NULL AND created_at >= (now() AT TIME ZONE 'UTC')::date
       AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
 ) x
 GROUP BY api_key_id`
