@@ -190,6 +190,20 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 						log.String("resource", option.ResourceType),
 						log.Int("cleanup_days", option.CleanupDays))
 				}
+			case CleanupResourceRequestBodies, CleanupResourceResponseBodies, CleanupResourceResponseChunks:
+				// Body-level retention: delete only the externally stored body files,
+				// keeping the request/execution records (and their metadata) intact.
+				deleted, err := w.cleanupExternalBodies(ctx, option.ResourceType, option.CleanupDays, manual)
+				if err != nil {
+					log.Error(ctx, "Failed to cleanup external bodies",
+						log.String("resource", option.ResourceType),
+						log.Cause(err))
+				} else {
+					log.Info(ctx, "Successfully cleaned up external bodies",
+						log.String("resource", option.ResourceType),
+						log.Int("cleanup_days", option.CleanupDays),
+						log.Int("deleted_files", deleted))
+				}
 			default:
 				log.Warn(ctx, "Unknown resource type for cleanup",
 					log.String("resource", option.ResourceType))
@@ -605,4 +619,204 @@ func (w *Worker) RunVacuumNow(ctx context.Context) error {
 func (w *Worker) RunCleanupNow(ctx context.Context) error {
 	w.runCleanup(ctx, true)
 	return nil
+}
+
+// Cleanup resource types for body-level retention. They delete only externally
+// stored body files and keep the request/execution records intact, so operators
+// can expire payloads faster than the request log itself.
+const (
+	CleanupResourceRequestBodies  = "request_bodies"
+	CleanupResourceResponseBodies = "response_bodies"
+	CleanupResourceResponseChunks = "response_chunks"
+)
+
+// bodyCleanupBatchSize bounds how many parent requests one cleanup pass handles per
+// query. Kept smaller than the table cleanup batch because each parent may trigger
+// extra per-execution file deletions.
+var bodyCleanupBatchSize = 200
+
+// cleanupExternalBodies deletes externally stored bodies older than cleanupDays
+// while keeping the database records. It walks a moving cursor so a daily run only
+// inspects the newly expired time range instead of the whole history.
+//
+// The cursor is advanced only when the whole window succeeded. A transient storage
+// error therefore retries the same range on the next run instead of silently
+// marking undeleted payloads as processed.
+func (w *Worker) cleanupExternalBodies(ctx context.Context, resourceType string, cleanupDays int, manual bool) (int, error) {
+	if !manual && cleanupDays <= 0 {
+		return 0, nil
+	}
+
+	if w.DataStorageService == nil {
+		return 0, nil
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -cleanupDays)
+	if manual && cleanupDays == 0 {
+		cutoff = time.Now()
+	}
+
+	// Resume from the previous cursor so each run only covers the newly expired
+	// window. A missing cursor means this resource has never run: there is no lower
+	// bound, so the entire backlog below the cutoff is walked. Any other read error
+	// must abort instead of being treated as "first run", otherwise a database blip
+	// would silently restart a full history scan or, worse, skip the backlog.
+	from, err := w.SystemService.BodyCleanupCursor(ctx, resourceType)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read body cleanup cursor: %w", err)
+	}
+
+	if !from.IsZero() && !from.Before(cutoff) {
+		log.Debug(ctx, "No new body retention window to process",
+			log.String("resource", resourceType),
+			log.Time("cursor", from),
+			log.Time("cutoff", cutoff))
+
+		return 0, nil
+	}
+
+	log.Info(ctx, "Purging external bodies",
+		log.String("resource", resourceType),
+		log.Time("from", from),
+		log.Time("cutoff", cutoff))
+
+	cache := make(map[int]*ent.DataStorage)
+	lastID := 0
+	attempted := 0
+
+	var firstErr error
+
+	for {
+		query := w.Ent.Request.Query().
+			Select(
+				request.FieldID,
+				request.FieldProjectID,
+				request.FieldDataStorageID,
+			).
+			Where(
+				request.CreatedAtLT(cutoff),
+				request.IDGT(lastID),
+				request.DataStorageIDNEQ(0),
+				request.ProjectIDNEQ(0),
+			)
+
+		if !from.IsZero() {
+			query = query.Where(request.CreatedAtGTE(from))
+		}
+
+		reqs, err := query.
+			Order(ent.Asc(request.FieldID)).
+			Limit(bodyCleanupBatchSize).
+			All(ctx)
+		if err != nil {
+			return attempted, fmt.Errorf("failed to query requests for body cleanup: %w", err)
+		}
+
+		if len(reqs) == 0 {
+			break
+		}
+
+		// Fetch every execution of this batch in one query; response bodies and
+		// chunks are stored under per-execution keys, not only under the parent.
+		batchIDs := make([]int, 0, len(reqs))
+		for _, req := range reqs {
+			batchIDs = append(batchIDs, req.ID)
+		}
+
+		executionsByRequest := make(map[int][]int, len(reqs))
+
+		execs, execErr := w.Ent.RequestExecution.Query().
+			Select(requestexecution.FieldID, requestexecution.FieldRequestID).
+			Where(requestexecution.RequestIDIn(batchIDs...)).
+			All(ctx)
+		if execErr != nil {
+			// Without the execution list we cannot build the per-execution keys, so
+			// the window is incomplete: keep the cursor where it is.
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to query executions for body cleanup: %w", execErr)
+			}
+		} else {
+			for _, exec := range execs {
+				executionsByRequest[exec.RequestID] = append(executionsByRequest[exec.RequestID], exec.ID)
+			}
+		}
+
+		for _, req := range reqs {
+			lastID = req.ID
+
+			ds, err := w.getDataStorageCached(ctx, req.DataStorageID, cache)
+			if err != nil {
+				log.Warn(ctx, "Failed to load data storage for body cleanup",
+					log.Cause(err),
+					log.Int("request_id", req.ID))
+
+				if firstErr == nil {
+					firstErr = fmt.Errorf("failed to load data storage %d: %w", req.DataStorageID, err)
+				}
+
+				continue
+			}
+
+			// Database-backed storage keeps the body in the row itself; those rows are
+			// handled by the "requests" retention option instead.
+			if ds == nil || ds.Primary {
+				continue
+			}
+
+			keys := bodyStorageKeys(req, executionsByRequest[req.ID], resourceType)
+			attempted += len(keys)
+
+			for _, key := range keys {
+				if err := w.DataStorageService.DeleteData(ctx, ds, key); err != nil {
+					log.Warn(ctx, "Failed to delete external body",
+						log.Cause(err),
+						log.String("key", key),
+						log.String("resource", resourceType))
+
+					if firstErr == nil {
+						firstErr = fmt.Errorf("failed to delete %s: %w", key, err)
+					}
+				}
+			}
+		}
+	}
+
+	if firstErr != nil {
+		return attempted, fmt.Errorf("body purge incomplete, cursor left unchanged: %w", firstErr)
+	}
+
+	if err := w.SystemService.SetBodyCleanupCursor(ctx, resourceType, cutoff); err != nil {
+		log.Warn(ctx, "Failed to persist body cleanup cursor",
+			log.Cause(err),
+			log.String("resource", resourceType))
+	}
+
+	return attempted, nil
+}
+
+// bodyStorageKeys returns every storage key that belongs to one request for the
+// given retention resource. Response bodies/chunks exist both on the parent request
+// and on each execution, so the execution IDs must be supplied.
+func bodyStorageKeys(req *ent.Request, executionIDs []int, resourceType string) []string {
+	keys := make([]string, 0, 1+len(executionIDs))
+
+	switch resourceType {
+	case CleanupResourceRequestBodies:
+		keys = append(keys, biz.GenerateRequestBodyKey(req.ProjectID, req.ID))
+		for _, execID := range executionIDs {
+			keys = append(keys, biz.GenerateExecutionRequestBodyKey(req.ProjectID, req.ID, execID))
+		}
+	case CleanupResourceResponseBodies:
+		keys = append(keys, biz.GenerateResponseBodyKey(req.ProjectID, req.ID))
+		for _, execID := range executionIDs {
+			keys = append(keys, biz.GenerateExecutionResponseBodyKey(req.ProjectID, req.ID, execID))
+		}
+	case CleanupResourceResponseChunks:
+		keys = append(keys, biz.GenerateResponseChunksKey(req.ProjectID, req.ID))
+		for _, execID := range executionIDs {
+			keys = append(keys, biz.GenerateExecutionResponseChunksKey(req.ProjectID, req.ID, execID))
+		}
+	}
+
+	return keys
 }

@@ -3,8 +3,10 @@ package biz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -152,6 +154,80 @@ type StoragePolicy struct {
 	StoreRequestBody  bool            `json:"store_request_body"`
 	StoreResponseBody bool            `json:"store_response_body"`
 	CleanupOptions    []CleanupOption `json:"cleanup_options"`
+	// ProjectOverrides allows per-project overrides of the two body flags above.
+	// The key is the project ID encoded as a decimal string (JSON object keys are
+	// strings). A nil pointer means "inherit the global value", so a project can opt
+	// out of one kind of body without affecting the other.
+	ProjectOverrides map[string]ProjectStorageOverride `json:"project_overrides,omitempty"`
+}
+
+// ProjectStorageOverride holds per-project overrides for body persistence.
+//
+// StoreRequestBody is the coarse switch that covers both sides of a gateway call.
+// StoreInboundRequestBody / StoreOutboundRequestBody refine it: inbound is the
+// original client payload stored on the request, outbound is the transformed
+// payload actually sent upstream, stored on each execution. A value wins over the
+// coarse switch, which in turn wins over the global policy.
+type ProjectStorageOverride struct {
+	StoreRequestBody         *bool `json:"store_request_body,omitempty"`
+	StoreResponseBody        *bool `json:"store_response_body,omitempty"`
+	StoreInboundRequestBody  *bool `json:"store_inbound_request_body,omitempty"`
+	StoreOutboundRequestBody *bool `json:"store_outbound_request_body,omitempty"`
+}
+
+// StoreRequestBodyFor reports whether request bodies should be persisted for the
+// given project regardless of direction. A project-specific override wins over the
+// global flag.
+func (p *StoragePolicy) StoreRequestBodyFor(projectID int) bool {
+	if p == nil {
+		return true
+	}
+
+	if ov, ok := p.ProjectOverrides[strconv.Itoa(projectID)]; ok && ov.StoreRequestBody != nil {
+		return *ov.StoreRequestBody
+	}
+
+	return p.StoreRequestBody
+}
+
+// StoreInboundRequestBodyFor reports whether the original client request body
+// should be persisted for the given project. It is the finest-grained switch and
+// falls back to StoreRequestBodyFor.
+func (p *StoragePolicy) StoreInboundRequestBodyFor(projectID int) bool {
+	if p != nil {
+		if ov, ok := p.ProjectOverrides[strconv.Itoa(projectID)]; ok && ov.StoreInboundRequestBody != nil {
+			return *ov.StoreInboundRequestBody
+		}
+	}
+
+	return p.StoreRequestBodyFor(projectID)
+}
+
+// StoreOutboundRequestBodyFor reports whether the transformed upstream request body
+// should be persisted for the given project. It is the finest-grained switch and
+// falls back to StoreRequestBodyFor.
+func (p *StoragePolicy) StoreOutboundRequestBodyFor(projectID int) bool {
+	if p != nil {
+		if ov, ok := p.ProjectOverrides[strconv.Itoa(projectID)]; ok && ov.StoreOutboundRequestBody != nil {
+			return *ov.StoreOutboundRequestBody
+		}
+	}
+
+	return p.StoreRequestBodyFor(projectID)
+}
+
+// StoreResponseBodyFor reports whether response bodies should be persisted for the
+// given project. A project-specific override wins over the global flag.
+func (p *StoragePolicy) StoreResponseBodyFor(projectID int) bool {
+	if p == nil {
+		return true
+	}
+
+	if ov, ok := p.ProjectOverrides[strconv.Itoa(projectID)]; ok && ov.StoreResponseBody != nil {
+		return *ov.StoreResponseBody
+	}
+
+	return p.StoreResponseBody
 }
 
 // CleanupOption represents cleanup configuration for a specific resource type.
@@ -764,18 +840,18 @@ func (s *SystemService) StoragePolicy(ctx context.Context) (*StoragePolicy, erro
 		return nil, fmt.Errorf("failed to get storage policy: %w", err)
 	}
 
-	var policy StoragePolicy
+	// Backward compatibility is expressed as defaults rather than by scanning the
+	// raw JSON: a legacy document without the body flags keeps them enabled, while a
+	// document that carries them (even only inside a nested project override) is
+	// decoded faithfully. Scanning for the key substring used to misfire as soon as
+	// `project_overrides` introduced a nested `store_request_body` key.
+	policy := StoragePolicy{
+		StoreRequestBody:  true,
+		StoreResponseBody: true,
+	}
+
 	if err := json.Unmarshal([]byte(value), &policy); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal storage policy: %w", err)
-	}
-
-	// Backward compatibility: if new keys are absent in stored JSON, default them to true
-	if !strings.Contains(value, "\"store_request_body\"") {
-		policy.StoreRequestBody = true
-	}
-
-	if !strings.Contains(value, "\"store_response_body\"") {
-		policy.StoreResponseBody = true
 	}
 
 	return &policy, nil
@@ -794,6 +870,54 @@ func (s *SystemService) StoragePolicyOrDefault(ctx context.Context) *StoragePoli
 	}
 
 	return policy
+}
+
+// SystemKeyBodyCleanupCursor stores per-resource cursors used by the GC worker to
+// purge externally stored bodies incrementally instead of rescanning all history.
+const SystemKeyBodyCleanupCursor = "body_cleanup_cursor"
+
+// BodyCleanupCursor returns the last cutoff already processed for the given body
+// resource type. A zero time with a nil error means nothing has been processed yet
+// (the setting does not exist); any other read failure is reported as an error so
+// callers can abort instead of mistaking it for a first run.
+func (s *SystemService) BodyCleanupCursor(ctx context.Context, resourceType string) (time.Time, error) {
+	value, err := s.getSystemValue(ctx, SystemKeyBodyCleanupCursor)
+	if err != nil {
+		var notFound *ent.NotFoundError
+		if errors.As(err, &notFound) {
+			return time.Time{}, nil
+		}
+
+		return time.Time{}, err
+	}
+
+	var cursors map[string]time.Time
+	if err := json.Unmarshal([]byte(value), &cursors); err != nil {
+		// A malformed cursor must not block cleanup; treat it as "start over".
+		return time.Time{}, nil
+	}
+
+	return cursors[resourceType], nil
+}
+
+// SetBodyCleanupCursor records the cutoff that has been processed for a body
+// resource type.
+func (s *SystemService) SetBodyCleanupCursor(ctx context.Context, resourceType string, at time.Time) error {
+	value, err := s.getSystemValue(ctx, SystemKeyBodyCleanupCursor)
+
+	cursors := map[string]time.Time{}
+	if err == nil && value != "" {
+		_ = json.Unmarshal([]byte(value), &cursors)
+	}
+
+	cursors[resourceType] = at
+
+	encoded, err := json.Marshal(cursors)
+	if err != nil {
+		return fmt.Errorf("failed to marshal body cleanup cursor: %w", err)
+	}
+
+	return s.setSystemValue(ctx, SystemKeyBodyCleanupCursor, string(encoded))
 }
 
 // SetStoragePolicy sets the storage policy configuration.
