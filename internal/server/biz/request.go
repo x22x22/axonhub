@@ -219,7 +219,7 @@ func (s *RequestService) CreateRequest(
 	// Decide whether to store the original request body
 	storeRequestBody := true
 	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
-		storeRequestBody = policy.StoreRequestBody
+		storeRequestBody = policy.StoreInboundRequestBodyFor(projectID)
 	} else {
 		log.Warn(ctx, "Failed to get storage policy, defaulting to store request body", log.Cause(err))
 	}
@@ -344,7 +344,7 @@ func (s *RequestService) CreateRequestExecution(
 	// Decide whether to store the channel request body
 	storeRequestBody := true
 	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
-		storeRequestBody = policy.StoreRequestBody
+		storeRequestBody = policy.StoreOutboundRequestBodyFor(request.ProjectID)
 	} else {
 		log.Warn(ctx, "Failed to get storage policy, defaulting to store request body", log.Cause(err))
 	}
@@ -462,14 +462,6 @@ func (s *RequestService) UpdateRequestCompleted(
 	responseBody any,
 	metrics *LatencyMetrics,
 ) error {
-	// Decide whether to store the final response body
-	storeResponseBody := true
-	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
-		storeResponseBody = policy.StoreResponseBody
-	} else {
-		log.Warn(ctx, "Failed to get storage policy, defaulting to store response body", log.Cause(err))
-	}
-
 	client := s.entFromContext(ctx)
 
 	// Only the storage id is needed here; a full Request.Get would pull the body
@@ -478,6 +470,15 @@ func (s *RequestService) UpdateRequestCompleted(
 	if err != nil {
 		log.Error(ctx, "Failed to get request", log.Cause(err))
 		return err
+	}
+
+	// Decide whether to store the final response body. This needs the project ID,
+	// because body persistence can be disabled per project.
+	storeResponseBody := true
+	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
+		storeResponseBody = policy.StoreResponseBodyFor(projectID)
+	} else {
+		log.Warn(ctx, "Failed to get storage policy, defaulting to store response body", log.Cause(err))
 	}
 
 	// Get data storage if set
@@ -550,14 +551,6 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 	responseBody any,
 	metrics *LatencyMetrics,
 ) error {
-	// Decide whether to store the final response body
-	storeResponseBody := true
-	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
-		storeResponseBody = policy.StoreResponseBody
-	} else {
-		log.Warn(ctx, "Failed to get storage policy, defaulting to store response body", log.Cause(err))
-	}
-
 	client := s.entFromContext(ctx)
 
 	// Only the storage id is needed here; a full Request.Get would pull the body
@@ -566,6 +559,15 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 	if err != nil {
 		log.Error(ctx, "Failed to get request", log.Cause(err))
 		return err
+	}
+
+	// Decide whether to store the final response body. This needs the project ID,
+	// because body persistence can be disabled per project.
+	storeResponseBody := true
+	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
+		storeResponseBody = policy.StoreResponseBodyFor(projectID)
+	} else {
+		log.Warn(ctx, "Failed to get storage policy, defaulting to store response body", log.Cause(err))
 	}
 
 	// Get data storage if set
@@ -636,14 +638,6 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 	responseBody any,
 	metrics *LatencyMetrics,
 ) error {
-	// Decide whether to store the final response body for execution
-	storeResponseBody := true
-	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
-		storeResponseBody = policy.StoreResponseBody
-	} else {
-		log.Warn(ctx, "Failed to get storage policy, defaulting to store response body", log.Cause(err))
-	}
-
 	client := s.entFromContext(ctx)
 
 	// Only the storage id is needed here; a full RequestExecution.Get would pull
@@ -652,6 +646,15 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 	if err != nil {
 		log.Error(ctx, "Failed to get request execution", log.Cause(err))
 		return err
+	}
+
+	// Decide whether to store the final response body for execution. This needs the
+	// project ID, because body persistence can be disabled per project.
+	storeResponseBody := true
+	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
+		storeResponseBody = policy.StoreResponseBodyFor(projectID)
+	} else {
+		log.Warn(ctx, "Failed to get storage policy, defaulting to store response body", log.Cause(err))
 	}
 
 	// Get data storage if set

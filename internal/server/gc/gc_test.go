@@ -170,6 +170,7 @@ func setupWorkerWithFSStorage(t *testing.T) (*Worker, context.Context, *ent.Data
 
 	worker := &Worker{
 		DataStorageService: dataStorageService,
+		SystemService:      systemService,
 		Ent:                client,
 	}
 

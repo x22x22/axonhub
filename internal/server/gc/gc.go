@@ -190,6 +190,20 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 						log.String("resource", option.ResourceType),
 						log.Int("cleanup_days", option.CleanupDays))
 				}
+			case CleanupResourceRequestBodies, CleanupResourceResponseBodies, CleanupResourceResponseChunks:
+				// Body-level retention: delete only the externally stored body files,
+				// keeping the request/execution records (and their metadata) intact.
+				deleted, err := w.cleanupExternalBodies(ctx, option.ResourceType, option.CleanupDays, manual)
+				if err != nil {
+					log.Error(ctx, "Failed to cleanup external bodies",
+						log.String("resource", option.ResourceType),
+						log.Cause(err))
+				} else {
+					log.Info(ctx, "Successfully cleaned up external bodies",
+						log.String("resource", option.ResourceType),
+						log.Int("cleanup_days", option.CleanupDays),
+						log.Int("deleted_files", deleted))
+				}
 			default:
 				log.Warn(ctx, "Unknown resource type for cleanup",
 					log.String("resource", option.ResourceType))
@@ -605,4 +619,168 @@ func (w *Worker) RunVacuumNow(ctx context.Context) error {
 func (w *Worker) RunCleanupNow(ctx context.Context) error {
 	w.runCleanup(ctx, true)
 	return nil
+}
+
+// Cleanup resource types for body-level retention. They delete only externally
+// stored body files and keep the request/execution records intact, so operators
+// can expire payloads faster than the request log itself.
+const (
+	CleanupResourceRequestBodies  = "request_bodies"
+	CleanupResourceResponseBodies = "response_bodies"
+	CleanupResourceResponseChunks = "response_chunks"
+)
+
+// bodyCleanupBatchSize bounds how many parent requests one cleanup pass handles
+// per query. Kept smaller than the table cleanup batch because each parent may
+// trigger extra per-execution file deletions.
+var bodyCleanupBatchSize = 200
+
+// cleanupExternalBodies deletes externally stored bodies older than cleanupDays
+// while keeping the database records. It walks a moving cursor so a daily run only
+// inspects the newly expired time range instead of the whole history.
+//
+// It returns the number of storage keys it attempted to delete.
+func (w *Worker) cleanupExternalBodies(ctx context.Context, resourceType string, cleanupDays int, manual bool) (int, error) {
+	if !manual && cleanupDays <= 0 {
+		return 0, nil
+	}
+
+	if w.DataStorageService == nil {
+		return 0, nil
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -cleanupDays)
+	if manual && cleanupDays == 0 {
+		cutoff = time.Now()
+	}
+
+	// Resume from the previous cursor so each run only covers the newly expired
+	// window. On the very first run the cursor is zero and there is no lower bound:
+	// we must walk the whole history below the cutoff, otherwise bodies older than
+	// one extra day would never be reclaimed.
+	from, err := w.SystemService.BodyCleanupCursor(ctx, resourceType)
+	if err != nil {
+		log.Warn(ctx, "Failed to read body cleanup cursor, treating as first run",
+			log.Cause(err),
+			log.String("resource", resourceType))
+
+		from = time.Time{}
+	}
+
+	if !from.IsZero() && !from.Before(cutoff) {
+		log.Debug(ctx, "No new body retention window to process",
+			log.String("resource", resourceType),
+			log.Time("cursor", from),
+			log.Time("cutoff", cutoff))
+
+		return 0, nil
+	}
+
+	log.Info(ctx, "Purging external bodies",
+		log.String("resource", resourceType),
+		log.Time("from", from),
+		log.Time("cutoff", cutoff))
+
+	cache := make(map[int]*ent.DataStorage)
+	lastID := 0
+	attempted := 0
+
+	for {
+		query := w.Ent.Request.Query().
+			Select(
+				request.FieldID,
+				request.FieldProjectID,
+				request.FieldDataStorageID,
+			).
+			Where(
+				request.CreatedAtLT(cutoff),
+				request.IDGT(lastID),
+				request.DataStorageIDNEQ(0),
+			)
+
+		if !from.IsZero() {
+			query = query.Where(request.CreatedAtGTE(from))
+		}
+
+		reqs, err := query.
+			Order(ent.Asc(request.FieldID)).
+			Limit(bodyCleanupBatchSize).
+			All(ctx)
+		if err != nil {
+			return attempted, fmt.Errorf("failed to query requests for body cleanup: %w", err)
+		}
+
+		if len(reqs) == 0 {
+			break
+		}
+
+		for _, req := range reqs {
+			lastID = req.ID
+
+			ds, err := w.getDataStorageCached(ctx, req.DataStorageID, cache)
+			if err != nil {
+				log.Warn(ctx, "Failed to load data storage for body cleanup",
+					log.Cause(err),
+					log.Int("request_id", req.ID))
+
+				continue
+			}
+
+			// Database-backed storage keeps the body in the row itself; those rows
+			// are handled by the "requests" retention option instead.
+			if ds == nil || ds.Primary {
+				continue
+			}
+
+			attempted += w.purgeRequestBodyFiles(ctx, ds, req, resourceType)
+		}
+	}
+
+	if err := w.SystemService.SetBodyCleanupCursor(ctx, resourceType, cutoff); err != nil {
+		log.Warn(ctx, "Failed to persist body cleanup cursor",
+			log.Cause(err),
+			log.String("resource", resourceType))
+	}
+
+	return attempted, nil
+}
+
+// purgeRequestBodyFiles deletes the body file(s) of one request that belong to the
+// given resource type and returns how many keys were attempted.
+func (w *Worker) purgeRequestBodyFiles(ctx context.Context, ds *ent.DataStorage, req *ent.Request, resourceType string) int {
+	keys := make([]string, 0, 2)
+
+	switch resourceType {
+	case CleanupResourceRequestBodies:
+		keys = append(keys, biz.GenerateRequestBodyKey(req.ProjectID, req.ID))
+
+		execs, err := w.Ent.RequestExecution.Query().
+			Select(requestexecution.FieldID).
+			Where(requestexecution.RequestIDEQ(req.ID)).
+			All(ctx)
+		if err != nil {
+			log.Warn(ctx, "Failed to query executions for request body cleanup",
+				log.Cause(err),
+				log.Int("request_id", req.ID))
+		}
+
+		for _, exec := range execs {
+			keys = append(keys, biz.GenerateExecutionRequestBodyKey(req.ProjectID, req.ID, exec.ID))
+		}
+	case CleanupResourceResponseBodies:
+		keys = append(keys, biz.GenerateResponseBodyKey(req.ProjectID, req.ID))
+	case CleanupResourceResponseChunks:
+		keys = append(keys, biz.GenerateResponseChunksKey(req.ProjectID, req.ID))
+	}
+
+	for _, key := range keys {
+		if err := w.DataStorageService.DeleteData(ctx, ds, key); err != nil {
+			log.Warn(ctx, "Failed to delete external body",
+				log.Cause(err),
+				log.String("key", key),
+				log.String("resource", resourceType))
+		}
+	}
+
+	return len(keys)
 }
