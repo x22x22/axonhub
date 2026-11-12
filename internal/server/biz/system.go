@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -839,18 +840,18 @@ func (s *SystemService) StoragePolicy(ctx context.Context) (*StoragePolicy, erro
 		return nil, fmt.Errorf("failed to get storage policy: %w", err)
 	}
 
-	var policy StoragePolicy
+	// Backward compatibility is expressed as defaults rather than by scanning the
+	// raw JSON: a legacy document without the body flags keeps them enabled, while a
+	// document that carries them (even only inside a nested project override) is
+	// decoded faithfully. Scanning for the key substring used to misfire as soon as
+	// `project_overrides` introduced a nested `store_request_body` key.
+	policy := StoragePolicy{
+		StoreRequestBody:  true,
+		StoreResponseBody: true,
+	}
+
 	if err := json.Unmarshal([]byte(value), &policy); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal storage policy: %w", err)
-	}
-
-	// Backward compatibility: if new keys are absent in stored JSON, default them to true
-	if !strings.Contains(value, "\"store_request_body\"") {
-		policy.StoreRequestBody = true
-	}
-
-	if !strings.Contains(value, "\"store_response_body\"") {
-		policy.StoreResponseBody = true
 	}
 
 	return &policy, nil
@@ -876,10 +877,17 @@ func (s *SystemService) StoragePolicyOrDefault(ctx context.Context) *StoragePoli
 const SystemKeyBodyCleanupCursor = "body_cleanup_cursor"
 
 // BodyCleanupCursor returns the last cutoff already processed for the given body
-// resource type. A zero time means nothing has been processed yet.
+// resource type. A zero time with a nil error means nothing has been processed yet
+// (the setting does not exist); any other read failure is reported as an error so
+// callers can abort instead of mistaking it for a first run.
 func (s *SystemService) BodyCleanupCursor(ctx context.Context, resourceType string) (time.Time, error) {
 	value, err := s.getSystemValue(ctx, SystemKeyBodyCleanupCursor)
 	if err != nil {
+		var notFound *ent.NotFoundError
+		if errors.As(err, &notFound) {
+			return time.Time{}, nil
+		}
+
 		return time.Time{}, err
 	}
 

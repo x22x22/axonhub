@@ -40,6 +40,12 @@ func (r *mutationResolver) UpdateBrandSettings(ctx context.Context, input Update
 
 // UpdateStoragePolicy is the resolver for the updateStoragePolicy field.
 func (r *mutationResolver) UpdateStoragePolicy(ctx context.Context, input biz.StoragePolicy) (bool, error) {
+	// The GraphQL input cannot carry project_overrides yet, and SetStoragePolicy
+	// replaces the whole JSON document. Without this carry-over, saving any storage
+	// setting from the UI would silently drop manually configured per-project
+	// overrides and start persisting bodies again for projects that opted out.
+	input.ProjectOverrides = r.systemService.StoragePolicyOrDefault(ctx).ProjectOverrides
+
 	err := r.systemService.SetStoragePolicy(ctx, &input)
 	if err != nil {
 		return false, fmt.Errorf("failed to update storage policy: %w", err)
