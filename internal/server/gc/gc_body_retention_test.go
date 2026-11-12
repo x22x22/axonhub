@@ -8,6 +8,7 @@ import (
 
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/request"
+	"github.com/looplj/axonhub/internal/ent/requestexecution"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/server/biz"
 )
@@ -121,4 +122,52 @@ func TestCleanupExternalBodiesSkipsPrimaryStorage(t *testing.T) {
 	row, err := worker.Ent.Request.Get(ctx, created.ID)
 	require.NoError(t, err)
 	require.NotEmpty(t, row.RequestBody, "in-row body must be untouched")
+}
+
+// TestCleanupExternalBodiesRemovesExecutionResponseKeys covers the review finding
+// that response bodies and chunks live under per-execution keys, so deleting only
+// the parent-request file would leave those payloads behind until the request
+// record itself expired.
+func TestCleanupExternalBodiesRemovesExecutionResponseKeys(t *testing.T) {
+	worker, ctx, dataStorage, baseDir := setupWorkerWithFSStorage(t)
+
+	const projectID = 21
+
+	req, err := worker.Ent.Request.Create().
+		SetProjectID(projectID).
+		SetModelID("deepseek-flash").
+		SetStatus(request.StatusCompleted).
+		SetDataStorageID(dataStorage.ID).
+		SetRequestBody([]byte("{}")).
+		SetCreatedAt(time.Now().AddDate(0, 0, -3)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	exec, err := worker.Ent.RequestExecution.Create().
+		SetRequestID(req.ID).
+		SetProjectID(projectID).
+		SetModelID("deepseek-flash").
+		SetDataStorageID(dataStorage.ID).
+		SetStatus(requestexecution.StatusCompleted).
+		SetRequestBody([]byte("{}")).
+		Save(ctx)
+	require.NoError(t, err)
+
+	parentResponse := biz.GenerateResponseBodyKey(projectID, req.ID)
+	execResponse := biz.GenerateExecutionResponseBodyKey(projectID, req.ID, exec.ID)
+	execChunks := biz.GenerateExecutionResponseChunksKey(projectID, req.ID, exec.ID)
+
+	createFileForKey(t, baseDir, parentResponse)
+	createFileForKey(t, baseDir, execResponse)
+	createFileForKey(t, baseDir, execChunks)
+
+	deleted, err := worker.cleanupExternalBodies(ctx, CleanupResourceResponseBodies, 1, false)
+	require.NoError(t, err)
+	require.Equal(t, 2, deleted, "parent response body plus execution response body")
+
+	assertRemoved(t, baseDir, parentResponse)
+	assertRemoved(t, baseDir, execResponse)
+
+	// Chunks belong to a different resource type and must survive this pass.
+	require.FileExists(t, pathForKey(baseDir, execChunks))
 }
