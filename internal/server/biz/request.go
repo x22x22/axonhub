@@ -320,7 +320,7 @@ func (s *RequestService) CreateRequest(
 	if useExternalStorage {
 		key := GenerateRequestBodyKey(projectID, req.ID)
 
-		err := s.DataStorageService.SaveData(ctx, dataStorage, key, requestBodyBytes)
+		err := s.DataStorageService.SaveDataWithOptions(ctx, dataStorage, key, requestBodyBytes, SaveOptions{Compress: true})
 		if err != nil {
 			// request_body is immutable in the schema, so it cannot be written back
 			// after the insert. The body is lost; log it loudly instead of failing
@@ -436,7 +436,7 @@ func (s *RequestService) CreateRequestExecution(
 	if useExternalStorage {
 		key := GenerateExecutionRequestBodyKey(request.ProjectID, request.ID, execution.ID)
 
-		err := s.DataStorageService.SaveData(ctx, dataStorage, key, requestBodyBytes)
+		err := s.DataStorageService.SaveDataWithOptions(ctx, dataStorage, key, requestBodyBytes, SaveOptions{Compress: true})
 		if err != nil {
 			// See CreateRequest: request_body is immutable, so the body cannot be
 			// written back after the insert.
@@ -521,7 +521,7 @@ func (s *RequestService) UpdateRequestCompleted(
 			// Save to external storage
 			key := GenerateResponseBodyKey(projectID, requestID)
 
-			if err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes); err != nil {
+			if err := s.DataStorageService.SaveDataWithOptions(ctx, dataStorage, key, responseBodyBytes, SaveOptions{Compress: true}); err != nil {
 				// Fall back to the database column so the response body is not lost.
 				log.Error(ctx, "Failed to save response body to external storage, falling back to database", log.Cause(err))
 				upd = upd.SetResponseBody(responseBodyBytes)
@@ -610,7 +610,7 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 			// Save to external storage
 			key := GenerateResponseBodyKey(projectID, requestID)
 
-			if err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes); err != nil {
+			if err := s.DataStorageService.SaveDataWithOptions(ctx, dataStorage, key, responseBodyBytes, SaveOptions{Compress: true}); err != nil {
 				// Fall back to the database column so the response body is not lost.
 				log.Error(ctx, "Failed to save response body to external storage, falling back to database", log.Cause(err))
 				upd = upd.SetResponseBody(responseBodyBytes)
@@ -696,7 +696,7 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 			// Save to external storage
 			key := GenerateExecutionResponseBodyKey(projectID, requestID, executionID)
 
-			if err := s.DataStorageService.SaveData(ctx, dataStorage, key, responseBodyBytes); err != nil {
+			if err := s.DataStorageService.SaveDataWithOptions(ctx, dataStorage, key, responseBodyBytes, SaveOptions{Compress: true}); err != nil {
 				// Fall back to the database column so the response body is not lost.
 				log.Error(ctx, "Failed to save execution response body to external storage, falling back to database", log.Cause(err))
 				upd = upd.SetResponseBody(responseBodyBytes)
@@ -861,7 +861,7 @@ func (s *RequestService) SaveRequestExecutionChunks(
 			return fmt.Errorf("failed to marshal all chunks: %w", err)
 		}
 
-		err = s.DataStorageService.SaveData(ctx, dataStorage, key, allChunksBytes)
+		err = s.DataStorageService.SaveDataWithOptions(ctx, dataStorage, key, allChunksBytes, SaveOptions{Compress: true})
 		if err != nil {
 			return fmt.Errorf("failed to save chunks to external storage: %w", err)
 		}
@@ -953,7 +953,7 @@ func (s *RequestService) SaveRequestChunks(
 			return fmt.Errorf("failed to marshal all chunks: %w", err)
 		}
 
-		err = s.DataStorageService.SaveData(ctx, dataStorage, key, allChunksBytes)
+		err = s.DataStorageService.SaveDataWithOptions(ctx, dataStorage, key, allChunksBytes, SaveOptions{Compress: true})
 		if err != nil {
 			return fmt.Errorf("failed to save chunks to external storage: %w", err)
 		}
