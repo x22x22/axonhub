@@ -44,6 +44,7 @@ require (
 	github.com/hokaccha/go-prettyjson v0.0.0-20211117102719-0474bc63780f
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/kaptinlin/jsonrepair v0.2.4
+	github.com/klauspost/compress v1.18.0
 	github.com/looplj/afero-s3 v0.1.0
 	github.com/looplj/afero-webdav v0.0.0-20260128073818-3f60e732e991
 	github.com/patrickmn/go-cache v2.1.0+incompatible

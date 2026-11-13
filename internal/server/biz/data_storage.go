@@ -503,6 +503,37 @@ func (s *DataStorageService) GetFileSystem(ctx context.Context, ds *ent.DataStor
 	return fs, nil
 }
 
+// SaveOptions controls optional post-processing applied when writing data.
+type SaveOptions struct {
+	// Compress enables transparent zstd compression for payloads at or above
+	// MinCompressSize. Readers always detect the frame magic, so enabling this does
+	// not require touching any read path or migrating existing files.
+	Compress bool
+	// MinCompressSize overrides DefaultMinCompressSize for this call.
+	MinCompressSize int
+}
+
+// SaveDataWithOptions saves data applying the given options.
+//
+// Compression is opt-in per call on purpose: SaveData is shared with backup and
+// media storage, where a compressed blob would be wrong (backups carry their own
+// archive format, media is already compressed).
+func (s *DataStorageService) SaveDataWithOptions(ctx context.Context, ds *ent.DataStorage, key string, data []byte, opts SaveOptions) error {
+	if opts.Compress {
+		minSize := opts.MinCompressSize
+		if minSize <= 0 {
+			minSize = DefaultMinCompressSize
+		}
+
+		// Never double-compress: a caller may pass bytes that are already a frame.
+		if len(data) >= minSize && !isZstdFrame(data) {
+			data = compressZstd(data)
+		}
+	}
+
+	return s.SaveData(ctx, ds, key, data)
+}
+
 // SaveData saves data to the specified data storage.
 func (s *DataStorageService) SaveData(ctx context.Context, ds *ent.DataStorage, key string, data []byte) error {
 	switch ds.Type {
@@ -666,7 +697,11 @@ func (s *DataStorageService) LoadData(ctx context.Context, ds *ent.DataStorage, 
 			return nil, fmt.Errorf("failed to read file: %w", err)
 		}
 
-		return data, nil
+		// Payloads written by SaveDataWithOptions are stored as zstd frames. The
+		// frame magic never collides with a JSON document, so uncompressed files
+		// (including everything written before compression existed) pass through
+		// untouched and need no migration.
+		return decompressZstd(data)
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", ds.Type)
 	}
