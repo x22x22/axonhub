@@ -116,6 +116,37 @@ func (t *SystemOneInboundTransformer) TransformError(
 		}
 	}
 
+	// Client-side validation failures never reach an upstream, so they must
+	// surface as 400. Returning 500 here would point callers at the wrong side of
+	// the request and invite pointless retries. TransformRequest raises
+	// transformer.ErrInvalidRequest for exactly this class (missing model/state/
+	// questions, unsupported stream, undecodable body), and the OpenAI inbound
+	// transformer already maps it the same way, so this keeps both protocols
+	// consistent.
+	// A model that does not exist is a client mistake about the model name, not a
+	// malformed request, so it keeps the distinct 422 the OpenAI and Anthropic
+	// inbound transformers use. Folding it into 400 would tell callers their
+	// payload shape is wrong when only the model differs.
+	if errors.Is(err, transformer.ErrInvalidModel) {
+		return &httpclient.Error{
+			StatusCode: http.StatusUnprocessableEntity,
+			Body: []byte(fmt.Sprintf(
+				`{"error":{"message":%q,"type":"invalid_model_error"}}`,
+				err.Error(),
+			)),
+		}
+	}
+
+	if errors.Is(err, transformer.ErrInvalidRequest) {
+		return &httpclient.Error{
+			StatusCode: http.StatusBadRequest,
+			Body: []byte(fmt.Sprintf(
+				`{"error":{"message":%q,"type":"invalid_request_error"}}`,
+				err.Error(),
+			)),
+		}
+	}
+
 	var respErr *llm.ResponseError
 	if errors.As(err, &respErr) {
 		errorBody := map[string]any{
