@@ -10,6 +10,7 @@ type systemOneWireRequest struct {
 	Model     string                           `json:"model"`
 	State     any                              `json:"state"`
 	Questions map[string]llm.SystemOneQuestion `json:"questions"`
+	Assets    map[string]llm.SystemOneAsset    `json:"assets,omitempty"`
 	Stream    *bool                            `json:"stream,omitempty"`
 }
 

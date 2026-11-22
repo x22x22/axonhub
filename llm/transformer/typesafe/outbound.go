@@ -79,6 +79,7 @@ func (t *OutboundTransformer) TransformRequest(
 		Model:     llmReq.Model,
 		State:     llmReq.SystemOne.State,
 		Questions: llmReq.SystemOne.Questions,
+		Assets:    llmReq.SystemOne.Assets,
 	}
 
 	body, err := json.Marshal(wireReq)
@@ -91,6 +92,7 @@ func (t *OutboundTransformer) TransformRequest(
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Accept", "application/json")
+	applyDangerZoneHeaders(headers, llmReq)
 
 	url := t.buildURL()
 
@@ -106,6 +108,47 @@ func (t *OutboundTransformer) TransformRequest(
 		RequestType: string(llm.RequestTypeSystemOne),
 		APIFormat:   string(llm.APIFormatTypeSafeSystemOne),
 	}, nil
+}
+
+// TypeSafe gates image input (assets and the "box" primitive) and long context
+// behind explicit opt-in headers. Sending a request that uses either feature
+// without the matching header is rejected upstream, so AxonHub turns the header
+// on when the request itself proves it needs it, and otherwise forwards the
+// caller's choice verbatim.
+const (
+	headerDangerZoneImages      = "TypeSafe-Danger-Zone-Images"
+	headerDangerZoneLongContext = "TypeSafe-Danger-Zone-Long-Context"
+)
+
+// applyDangerZoneHeaders enables the TypeSafe opt-in headers the request
+// requires and forwards any the caller set explicitly.
+func applyDangerZoneHeaders(headers http.Header, llmReq *llm.Request) {
+	if headers == nil || llmReq == nil || llmReq.SystemOne == nil {
+		return
+	}
+
+	needsImages := len(llmReq.SystemOne.Assets) > 0
+	if !needsImages {
+		for _, question := range llmReq.SystemOne.Questions {
+			if strings.EqualFold(strings.TrimSpace(question.Type), "box") {
+				needsImages = true
+				break
+			}
+		}
+	}
+	if needsImages {
+		headers.Set(headerDangerZoneImages, "true")
+	}
+
+	// Long context has no request signal AxonHub can infer, so it stays a caller
+	// decision. Forward it rather than dropping it silently.
+	if rawReq := llmReq.RawRequest; rawReq != nil {
+		for _, name := range []string{headerDangerZoneLongContext, headerDangerZoneImages} {
+			if value := strings.TrimSpace(rawReq.Headers.Get(name)); value != "" {
+				headers.Set(name, value)
+			}
+		}
+	}
 }
 
 func (t *OutboundTransformer) buildURL() string {
