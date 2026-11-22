@@ -76,6 +76,7 @@ The request body is a JSON object containing `model`, `state`, and `questions`:
 | `model` | string | ✅ | Target model name (e.g., `jev-latest`, `jev-preview`, `jev-1.13.0`, or a configured model mapping alias). |
 | `state` | string / object / array | ✅ | Context or entity to evaluate. AxonHub preserves objects and arrays without lossy stringification. **Only a string, object, or array is accepted**: a bare number, boolean, or `null` is rejected upstream with 422 — wrap such values in an object, e.g. `{"amount": 42}` instead of `42`. |
 | `questions` | map<string, Question> | ✅ | Map of question identifiers to question specifications. |
+| `assets` | map<string, Asset> | ❌ | Image assets keyed by placeholder, for `box` or any primitive needing vision. See "Images and Assets" below. |
 
 ---
 
@@ -117,6 +118,56 @@ Interpolates continuous numeric scores against an ordered ladder of qualitative 
   - `legend`: Level descriptions.
   - `probabilities`: `Record<string, float>`, probability distribution across level indices.
   - `confidence`: `float` (0.0 ~ 1.0), certainty score.
+
+### 4. `box` (Image Region Grounding)
+Locates a described region inside an image and returns a normalized bounding box. This is the only visual primitive.
+
+- **Request Definition**:
+  - `type`: `"box"`
+  - `instructions`: string / object / array describing the region to locate.
+- **Response Fields**:
+  - `box`: `{ top, bottom, left, right }`, each edge a 0.0 ~ 1.0 fraction of the image dimension.
+  - `confidence`: `float` (0.0 ~ 1.0) for the localization.
+
+> `box` requires image input, so the request must carry image assets (see `assets` below). AxonHub **sets the TypeSafe opt-in header automatically** whenever it detects a `box` question or any `assets`, so callers never set it by hand.
+
+---
+
+## Images and Assets (`assets`)
+
+`assets` injects images into `state`, `instructions`, and `criteria`. It is an **object keyed by placeholder**; each placeholder is replaced with the real image within that request.
+
+```json
+{
+  "model": "jev-latest",
+  "state": "Image {img1}",
+  "assets": {
+    "img1": {
+      "type": "image",
+      "format": "png",
+      "data_base64": "iVBORw0KGgoAAAANSUhEUg..."
+    }
+  },
+  "questions": {
+    "loc": { "type": "box", "instructions": "Locate the red region" },
+    "has_red": { "type": "noul", "instructions": "Does {img1} contain red?" }
+  }
+}
+```
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `assets.<placeholder>.type` | string | Asset kind; currently only `"image"`. |
+| `assets.<placeholder>.format` | string | Image format: `png` / `jpg` / `jpeg`. Required with `data_base64`. |
+| `assets.<placeholder>.data_base64` | string | Base64-encoded image bytes. |
+| `assets.<placeholder>.part` | string | Name of the multipart part holding the image. When set, `data_base64` is ignored. |
+
+**Notes**:
+
+1. **Placeholders are string substitutions**: every occurrence of `{img1}` inside `state`, `instructions`, or `criteria` is replaced. Use a per-image UUID as the placeholder so ordinary prose is never rewritten by accident.
+2. **Images have a minimum size**: upstream rejects 256×256 with `Invalid image dimensions`; 512×512 works. Use a sufficiently large image.
+3. **Experimental feature**: TypeSafe marks image support experimental and requires the `TypeSafe-Danger-Zone-Images: true` header. AxonHub sets it automatically; an explicit caller value still wins.
+4. **Long context**: the optional `TypeSafe-Danger-Zone-Long-Context: true` header is **forwarded verbatim** by AxonHub. That switch has no inferable request signal, so the caller decides.
 
 ---
 

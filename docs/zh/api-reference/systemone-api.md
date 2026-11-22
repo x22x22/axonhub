@@ -76,12 +76,13 @@ System One API 使用标准 Bearer 令牌认证：
 | `model` | string | ✅ | 调用的模型名称（如 `jev-latest`、`jev-preview`、`jev-1.13.0` 或配置的自定义映射模型）。 |
 | `state` | string / object / array | ✅ | 被评估的实体或上下文信息。AxonHub 完整保留其结构体或数组，不会被字符串化。**该字段只接受字符串、对象或数组**：裸数字、布尔值或 `null` 会被上游拒绝并返回 422，需要这类值请包进对象，例如 `{"amount": 42}` 而非 `42`。 |
 | `questions` | map<string, Question> | ✅ | 问题定义字典，键为问题标识符，值为问题规格。 |
+| `assets` | map<string, Asset> | ❌ | 图片资产，键为占位符。供 `box` 题型或需要视觉理解的 `noul`/`choice`/`score` 使用，详见下文「图片与资产」。 |
 
 ---
 
-## 三大决策能力原语（Primitives）
+## 四大决策能力原语（Primitives）
 
-每个 Question 规格中必须指定 `type`，目前支持以下 3 种原生原语：
+每个 Question 规格中必须指定 `type`，支持以下 4 种原生原语：
 
 ### 1. `noul`（真值判断）
 用于判断某个陈述是否属实的二元判定问题。
@@ -117,6 +118,56 @@ System One API 使用标准 Bearer 令牌认证：
   - `legend`: 评分图例。
   - `probabilities`: `Record<string, float>`，各等级维度的概率分布。
   - `confidence`: `float` (0.0 ~ 1.0)，置信度。
+
+### 4. `box`（图像区域定位）
+在一张图片中定位满足描述的区域，返回归一化的边界框。这是唯一的视觉原语。
+
+- **请求定义**：
+  - `type`: `"box"`
+  - `instructions`: string / object / array，描述要定位的目标区域。
+- **返回结果**：
+  - `box`: `{ top, bottom, left, right }`，四条边均为 0.0 ~ 1.0 的比例值（相对于图片宽高）。
+  - `confidence`: `float` (0.0 ~ 1.0)，定位置信度。
+
+> `box` 依赖图片输入，因此请求必须携带图片资产（见下节 `assets`）。AxonHub 会在检测到 `box` 题型或 `assets` 时**自动补上** TypeSafe 要求的实验开关头，调用方无需手动设置。
+
+---
+
+## 图片与资产（`assets`）
+
+`assets` 用于给 `state`、`instructions`、`criteria` 注入图片。它是一个**以占位符为键的对象**，占位符在该请求内被替换为真实图片。
+
+```json
+{
+  "model": "jev-latest",
+  "state": "Image {img1}",
+  "assets": {
+    "img1": {
+      "type": "image",
+      "format": "png",
+      "data_base64": "iVBORw0KGgoAAAANSUhEUg..."
+    }
+  },
+  "questions": {
+    "loc": { "type": "box", "instructions": "Locate the red region" },
+    "has_red": { "type": "noul", "instructions": "Does {img1} contain red?" }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `assets.<占位符>.type` | string | 资产类型，目前仅 `"image"`。 |
+| `assets.<占位符>.format` | string | 图片格式，`png` / `jpg` / `jpeg`；与 `data_base64` 搭配时必填。 |
+| `assets.<占位符>.data_base64` | string | Base64 编码的图片字节。 |
+| `assets.<占位符>.part` | string | multipart 请求中承载图片的 part 名；设置后忽略 `data_base64`。 |
+
+**注意事项**：
+
+1. **占位符是字符串替换**：`{img1}` 出现在 `state`、`instructions`、`criteria` 的任意字符串中都会被替换。建议用每张图独立的 UUID 作为占位符，避免误伤正文里的普通文本。
+2. **图片有尺寸下限**：实测 256×256 会被上游以 `Invalid image dimensions` 拒绝，512×512 正常。请使用足够分辨率的图片。
+3. **实验特性**：TypeSafe 将图片能力标记为实验性，要求请求头 `TypeSafe-Danger-Zone-Images: true`。AxonHub 会自动加上该头，无需调用方处理；若调用方显式设置了该头，则以调用方为准。
+4. **长上下文**：超长 `state` 可选的 `TypeSafe-Danger-Zone-Long-Context: true` 头会由 AxonHub **原样透传**。该开关没有可推断的请求信号，需调用方自行决定。
 
 ---
 
