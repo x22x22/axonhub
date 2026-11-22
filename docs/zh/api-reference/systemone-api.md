@@ -74,7 +74,7 @@ System One API 使用标准 Bearer 令牌认证：
 | 字段 | 类型 | 必填 | 说明 |
 | :--- | :--- | :---: | :--- |
 | `model` | string | ✅ | 调用的模型名称（如 `jev-latest`、`jev-preview`、`jev-1.13.0` 或配置的自定义映射模型）。 |
-| `state` | string / object / array | ✅ | 被评估的实体或上下文信息。AxonHub 完整保留其结构体或数组，不会被字符串化。 |
+| `state` | string / object / array | ✅ | 被评估的实体或上下文信息。AxonHub 完整保留其结构体或数组，不会被字符串化。**该字段只接受字符串、对象或数组**：裸数字、布尔值或 `null` 会被上游拒绝并返回 422，需要这类值请包进对象，例如 `{"amount": 42}` 而非 `42`。 |
 | `questions` | map<string, Question> | ✅ | 问题定义字典，键为问题标识符，值为问题规格。 |
 
 ---
@@ -316,6 +316,7 @@ Workers AI 以账号级 Base URL 提供决策模型，一个渠道同时覆盖�
 ### 4. 故障转移与重试（Failover）
 - **429（限流）/ 529（上游过载）**：AxonHub 自动识别并触发渠道重试或故障转移到备用 System One 渠道。
 - **401（鉴权失败）/ 422（参数校验错误）**：精准透传上游错误信息，不进行无效的无限重试。
+- **400（请求格式错误）**：请求在本地即被拒绝，不会发往上游，包括缺少 `model` / `state` / `questions`、`questions` 为空、`stream` 为 `true`、以及请求体无法解析。
 
 ---
 
@@ -323,4 +324,5 @@ Workers AI 以账号级 Base URL 提供决策模型，一个渠道同时覆盖�
 
 1. **不支持流式传输（Streaming）**：System One 是单次确定的决策原语调用，非逐字生成的聊天模型，请求中包含 `stream: true` 会被拦截并返回 400 错误。
 2. **不支持 Chat 专属参数**：请勿传入 `temperature`、`top_p`、`max_tokens`、`tools` 或 `messages` 等生成式参数。
-3. **键名读取与大小写**：请通过键名读取 `criteria` 和 `probabilities`（区分大小写）。根据 JSON 规范，对象键顺序不属于稳定的 API 契约。
+3. **`state` 的类型边界**：只接受字符串、对象或数组。裸数字（如 `42`）、布尔值和 `null` 会被上游以 422 拒绝；需要传递数值时请包进对象或数组，例如 `{"order_total": 42}`。
+4. **键名读取与大小写**：请通过键名读取 `criteria` 和 `probabilities`（区分大小写）。根据 JSON 规范，对象键顺序不属于稳定的 API 契约。

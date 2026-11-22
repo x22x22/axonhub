@@ -74,7 +74,7 @@ The request body is a JSON object containing `model`, `state`, and `questions`:
 | Parameter | Type | Required | Description |
 | :--- | :--- | :---: | :--- |
 | `model` | string | ✅ | Target model name (e.g., `jev-latest`, `jev-preview`, `jev-1.13.0`, or a configured model mapping alias). |
-| `state` | string / object / array | ✅ | Context or entity to evaluate. AxonHub preserves objects and arrays without lossy stringification. |
+| `state` | string / object / array | ✅ | Context or entity to evaluate. AxonHub preserves objects and arrays without lossy stringification. **Only a string, object, or array is accepted**: a bare number, boolean, or `null` is rejected upstream with 422 — wrap such values in an object, e.g. `{"amount": 42}` instead of `42`. |
 | `questions` | map<string, Question> | ✅ | Map of question identifiers to question specifications. |
 
 ---
@@ -316,10 +316,12 @@ Client requests can use abstracted aliases via model mapping:
 ### 4. Failover and Retries
 - **429 (Rate Limit) / 529 (Overloaded)**: AxonHub triggers retry or failover to alternative System One channels.
 - **401 (Auth Failed) / 422 (Unprocessable Entity)**: Pass through immediately without redundant retries.
+- **400 (Invalid Request)**: Rejected locally before reaching any upstream — missing `model` / `state` / `questions`, empty `questions`, `stream: true`, or an undecodable body.
 
 ---
 
 ## Known Limitations
 
 1. **No Streaming Support**: System One is a deterministic single-step evaluation. Requests with `stream: true` are rejected with HTTP 400.
-2. **No Chat Generation Parameters**: Do not pass `messages`, `temperature`, `top_p`, `max_tokens`, or `tools`.
+2. **`state` Type Boundary**: Only a string, object, or array is accepted. A bare number (such as `42`), a boolean, or `null` is rejected upstream with 422; wrap numeric values in an object or array, e.g. `{"order_total": 42}`.
+3. **No Chat Generation Parameters**: Do not pass `messages`, `temperature`, `top_p`, `max_tokens`, or `tools`.
