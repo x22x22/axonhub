@@ -58,7 +58,7 @@ func (t *SystemOneInboundTransformer) TransformRequest(
 		RequestType: llm.RequestTypeSystemOne,
 		APIFormat:   llm.APIFormatTypeSafeSystemOne,
 		SystemOne: &llm.SystemOneRequest{
-			Assets: wireReq.Assets,
+			Assets:    wireReq.Assets,
 			State:     wireReq.State,
 			Questions: wireReq.Questions,
 		},
