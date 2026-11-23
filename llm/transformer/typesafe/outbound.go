@@ -144,11 +144,36 @@ func applyDangerZoneHeaders(headers http.Header, llmReq *llm.Request) {
 	// decision. Forward it rather than dropping it silently.
 	if rawReq := llmReq.RawRequest; rawReq != nil {
 		for _, name := range []string{headerDangerZoneLongContext, headerDangerZoneImages} {
-			if value := strings.TrimSpace(rawReq.Headers.Get(name)); value != "" {
+			if value := lookupHeaderCanonicalInsensitive(rawReq.Headers, name); value != "" {
 				headers.Set(name, value)
 			}
 		}
 	}
+}
+
+// lookupHeaderCanonicalInsensitive reads a header regardless of how the map key
+// is cased. http.Header.Get only matches the canonical form
+// ("Typesafe-Danger-Zone-Images"), so a map populated with the original casing
+// ("TypeSafe-Danger-Zone-Images") would silently read as empty. Real server
+// traffic is canonical, but test fixtures and reverse proxies are not
+// guaranteed to be, and silently dropping the caller's opt-in is worse than
+// scanning the few headers.
+func lookupHeaderCanonicalInsensitive(headers http.Header, name string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	if value := strings.TrimSpace(headers.Get(name)); value != "" {
+		return value
+	}
+	for key, values := range headers {
+		if len(values) == 0 || !strings.EqualFold(key, name) {
+			continue
+		}
+		if value := strings.TrimSpace(values[0]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (t *OutboundTransformer) buildURL() string {
