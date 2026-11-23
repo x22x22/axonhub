@@ -130,6 +130,8 @@ System One API 使用标准 Bearer 令牌认证：
   - `confidence`: `float` (0.0 ~ 1.0)，定位置信度。
 
 > `box` 依赖图片输入，因此请求必须携带图片资产（见下节 `assets`）。AxonHub 会在检测到 `box` 题型或 `assets` 时**自动补上** TypeSafe 要求的实验开关头，调用方无需手动设置。
+>
+> **重要**：`box` **没有"未找到"这种答案**。即使目标不存在，上游仍会返回一个边界框，只是 `confidence` 明显偏低（实测在不含目标的图片上约为 0.07）。因此正确的用法是先用一个 `noul` 判断目标是否存在，再决定是否采用 `box` 的结果。
 
 ---
 
@@ -165,9 +167,11 @@ System One API 使用标准 Bearer 令牌认证：
 **注意事项**：
 
 1. **占位符是字符串替换**：`{img1}` 出现在 `state`、`instructions`、`criteria` 的任意字符串中都会被替换。建议用每张图独立的 UUID 作为占位符，避免误伤正文里的普通文本。
-2. **图片有尺寸下限**：实测 256×256 会被上游以 `Invalid image dimensions` 拒绝，512×512 正常。请使用足够分辨率的图片。
+2. **图片尺寸范围**：每条边必须在 **280 ~ 1568** 像素之间（实测 279 与 1569 均被上游以 `Invalid image dimensions` 拒绝，280 与 1568 通过）。单文件不超过 16 MiB，且必须是非动图 PNG / JPEG——动图 PNG 会被拒绝。
 3. **实验特性**：TypeSafe 将图片能力标记为实验性，要求请求头 `TypeSafe-Danger-Zone-Images: true`。AxonHub 会自动加上该头，无需调用方处理；若调用方显式设置了该头，则以调用方为准。
 4. **长上下文**：超长 `state` 可选的 `TypeSafe-Danger-Zone-Long-Context: true` 头会由 AxonHub **原样透传**。该开关没有可推断的请求信号，需调用方自行决定。
+5. **每个资产必须被引用**：未被任何占位符命中的 `assets` 条目会被上游拒绝（`Invalid image request`）。注意 `instructions` 与 `criteria` 同样算引用点。
+6. **单个占位符不超过 1024 字节**：超长引用会被上游以 413 `Request exceeds size limits` 拒绝，而不是 400。
 
 ---
 

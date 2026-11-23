@@ -130,6 +130,8 @@ Locates a described region inside an image and returns a normalized bounding box
   - `confidence`: `float` (0.0 ~ 1.0) for the localization.
 
 > `box` requires image input, so the request must carry image assets (see `assets` below). AxonHub **sets the TypeSafe opt-in header automatically** whenever it detects a `box` question or any `assets`, so callers never set it by hand.
+>
+> **Important**: `box` has **no "not found" answer**. Even when the target is absent, upstream still returns a bounding box — only its `confidence` drops noticeably (measured around 0.07 on an image that does not contain the target). The correct pattern is to ask a `noul` whether the target exists first, then decide whether to use the `box` result.
 
 ---
 
@@ -165,9 +167,11 @@ Locates a described region inside an image and returns a normalized bounding box
 **Notes**:
 
 1. **Placeholders are string substitutions**: every occurrence of `{img1}` inside `state`, `instructions`, or `criteria` is replaced. Use a per-image UUID as the placeholder so ordinary prose is never rewritten by accident.
-2. **Images have a minimum size**: upstream rejects 256×256 with `Invalid image dimensions`; 512×512 works. Use a sufficiently large image.
+2. **Image size range**: every edge must be between **280 and 1568** pixels (measured: 279 and 1569 are both rejected with `Invalid image dimensions`, while 280 and 1568 pass). Each file is capped at 16 MiB and must be a still PNG or JPEG — animated PNGs are rejected.
 3. **Experimental feature**: TypeSafe marks image support experimental and requires the `TypeSafe-Danger-Zone-Images: true` header. AxonHub sets it automatically; an explicit caller value still wins.
 4. **Long context**: the optional `TypeSafe-Danger-Zone-Long-Context: true` header is **forwarded verbatim** by AxonHub. That switch has no inferable request signal, so the caller decides.
+5. **Every asset must be referenced**: an `assets` entry that no placeholder resolves to is rejected upstream (`Invalid image request`). Note that `instructions` and `criteria` count as reference sites too.
+6. **A single placeholder is capped at 1024 bytes**: longer references are rejected upstream with 413 `Request exceeds size limits`, not 400.
 
 ---
 
