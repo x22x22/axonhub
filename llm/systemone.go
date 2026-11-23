@@ -50,6 +50,56 @@ type SystemOneQuestion struct {
 
 	// Criteria holds optional evaluation criteria/rubric.
 	Criteria any `json:"criteria,omitempty"`
+
+	// Extra carries question fields AxonHub does not model yet, so a provider
+	// adding a new parameter to a primitive does not lose it in transit.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (q *SystemOneQuestion) UnmarshalJSON(data []byte) error {
+	type Alias SystemOneQuestion
+	var aux Alias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*q = SystemOneQuestion(aux)
+
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		return err
+	}
+
+	delete(rawMap, "type")
+	delete(rawMap, "instructions")
+	delete(rawMap, "criteria")
+
+	if len(rawMap) > 0 {
+		q.Extra = rawMap
+	}
+	return nil
+}
+
+func (q SystemOneQuestion) MarshalJSON() ([]byte, error) {
+	type Alias SystemOneQuestion
+	base, err := json.Marshal(Alias(q))
+	if err != nil {
+		return nil, err
+	}
+	if len(q.Extra) == 0 {
+		return base, nil
+	}
+
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(base, &rawMap); err != nil {
+		return nil, err
+	}
+	if rawMap == nil {
+		rawMap = make(map[string]json.RawMessage)
+	}
+	for k, v := range q.Extra {
+		rawMap[k] = v
+	}
+	return json.Marshal(rawMap)
 }
 
 // SystemOneResponse represents the unified result of a System One decision inference.

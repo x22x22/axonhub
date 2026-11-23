@@ -197,3 +197,38 @@ func TestSystemOneQuestionStructuredInstructions(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, original, string(raw))
 }
+
+// TestSystemOneQuestionExtraRoundTrip 未知题型字段必须能入站保留、出站还原，
+// 否则上游给原语加参数时网关会静默丢弃。
+func TestSystemOneQuestionExtraRoundTrip(t *testing.T) {
+	original := `{"type":"box","instructions":"locate","future_param":{"mode":"strict"},"flag":true}`
+
+	var q SystemOneQuestion
+	require.NoError(t, json.Unmarshal([]byte(original), &q))
+	require.Equal(t, "box", q.Type)
+	require.Contains(t, q.Extra, "future_param")
+	require.Contains(t, q.Extra, "flag")
+
+	raw, err := json.Marshal(q)
+	require.NoError(t, err)
+	require.JSONEq(t, original, string(raw), "未知字段必须原样往返")
+}
+
+// TestSystemOneQuestionExtraNotDuplicated 已知字段不得同时进入 Extra，
+// 否则序列化会出现重复键。
+func TestSystemOneQuestionExtraNotDuplicated(t *testing.T) {
+	var q SystemOneQuestion
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"type":"choice","instructions":"pick","criteria":{"a":"x"}}`,
+	), &q))
+
+	require.Empty(t, q.Extra, "只有未知字段才进 Extra")
+}
+
+// TestSystemOneQuestionExtraEmptyStaysNil 没有未知字段时 Extra 应保持 nil，
+// 避免序列化路径多做一次 map 合并。
+func TestSystemOneQuestionExtraEmptyStaysNil(t *testing.T) {
+	var q SystemOneQuestion
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"noul","instructions":"?"}`), &q))
+	require.Nil(t, q.Extra)
+}
