@@ -237,3 +237,50 @@ func TestLiveFormatDetectedFromBytes(t *testing.T) {
 	require.Equal(t, 200, status,
 		"format 标签与内容不符时应按字节检测而通过，实际 %d: %s", status, body)
 }
+
+// TestLiveBareScalarStateRejectedUpstream 文档声称 state 只接受
+// string / object / array，裸 number / boolean / null 会被 422 拒绝。
+// 这条测试把声明钉在真实上游上，避免文档漂移。
+func TestLiveBareScalarStateRejectedUpstream(t *testing.T) {
+	tr := liveOutbound(t)
+
+	rejected := map[string]any{
+		"number":  42,
+		"boolean": true,
+		"float":   3.14,
+	}
+
+	for name, state := range rejected {
+		t.Run(name, func(t *testing.T) {
+			req := &llm.Request{
+				Model: "jev-latest",
+				SystemOne: &llm.SystemOneRequest{
+					State: state,
+					Questions: map[string]llm.SystemOneQuestion{
+						"q": {Type: "noul", Instructions: "Is this a number?"},
+					},
+				},
+			}
+
+			status, body := sendLive(t, tr, req)
+			require.Equal(t, 422, status,
+				"裸 %s 型 state 应被 422 拒绝，实际 %d: %s", name, status, body)
+		})
+	}
+
+	// 正向对照：包一层对象即可通过
+	t.Run("object wrapper accepted", func(t *testing.T) {
+		req := &llm.Request{
+			Model: "jev-latest",
+			SystemOne: &llm.SystemOneRequest{
+				State: map[string]any{"amount": 42, "currency": "USD"},
+				Questions: map[string]llm.SystemOneQuestion{
+					"q": {Type: "noul", Instructions: "Is this about money?"},
+				},
+			},
+		}
+
+		status, body := sendLive(t, tr, req)
+		require.Equal(t, 200, status, "对象包装的 state 应被接受，实际 %d: %s", status, body)
+	})
+}
