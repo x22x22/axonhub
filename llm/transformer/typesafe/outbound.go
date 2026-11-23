@@ -75,6 +75,21 @@ func (t *OutboundTransformer) TransformRequest(
 		return nil, fmt.Errorf("model is required")
 	}
 
+	// assets 的 part 模式要求整个请求体是 multipart：上游只要看到 part
+	// 字段就按 multipart 解析，即使同时给了 data_base64 也会以
+	// "Invalid image request" 拒绝。AxonHub 的入站与出站都是 JSON，
+	// part 在此环境下无法工作，因此提前给出可读错误，而不是把请求送给
+	// 上游换回一条不说明原因的消息。
+	for name, asset := range llmReq.SystemOne.Assets {
+		if asset.Part != "" {
+			return nil, fmt.Errorf(
+				"asset %q references multipart part %q, but AxonHub only sends JSON bodies; "+
+					"inline the image bytes as data_base64 instead of using part",
+				name, asset.Part,
+			)
+		}
+	}
+
 	wireReq := systemOneWireRequest{
 		Model:     llmReq.Model,
 		State:     llmReq.SystemOne.State,

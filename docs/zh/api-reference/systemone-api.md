@@ -162,7 +162,7 @@ System One API 使用标准 Bearer 令牌认证：
 | `assets.<占位符>.type` | string | 资产类型，目前仅 `"image"`。 |
 | `assets.<占位符>.format` | string | 图片格式，`png` / `jpg` / `jpeg`；与 `data_base64` 搭配时必填。 |
 | `assets.<占位符>.data_base64` | string | Base64 编码的图片字节。 |
-| `assets.<占位符>.part` | string | multipart 请求中承载图片的 part 名；设置后忽略 `data_base64`。 |
+| `assets.<占位符>.part` | string | 仅供 multipart 请求使用；**AxonHub 不支持**，设置了会被网关直接拒绝（见下方说明）。 |
 
 **注意事项**：
 
@@ -172,6 +172,7 @@ System One API 使用标准 Bearer 令牌认证：
 4. **长上下文**：超长 `state` 可选的 `TypeSafe-Danger-Zone-Long-Context: true` 头会由 AxonHub **原样透传**。该开关没有可推断的请求信号，需调用方自行决定。
 5. **每个资产必须被引用**：未被任何占位符命中的 `assets` 条目会被上游拒绝（`Invalid image request`）。注意 `instructions` 与 `criteria` 同样算引用点。
 6. **单个占位符不超过 1024 字节**：超长引用会被上游以 413 `Request exceeds size limits` 拒绝，而不是 400。
+7. **不支持 multipart 的 `part` 模式**：上游只要看到 `part` 字段就按 multipart 解析整个请求体，即使同时提供了 `data_base64` 也会以 `Invalid image request` 拒绝。AxonHub 的入站与出站都是 JSON，因此会在出站前直接拒绝设置了 `part` 的请求并说明原因。图片请一律内联为 `data_base64`。
 
 ---
 

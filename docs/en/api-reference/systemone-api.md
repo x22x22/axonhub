@@ -162,7 +162,7 @@ Locates a described region inside an image and returns a normalized bounding box
 | `assets.<placeholder>.type` | string | Asset kind; currently only `"image"`. |
 | `assets.<placeholder>.format` | string | Image format: `png` / `jpg` / `jpeg`. Required with `data_base64`. |
 | `assets.<placeholder>.data_base64` | string | Base64-encoded image bytes. |
-| `assets.<placeholder>.part` | string | Name of the multipart part holding the image. When set, `data_base64` is ignored. |
+| `assets.<placeholder>.part` | string | Only for multipart requests; **not supported by AxonHub** and rejected by the gateway (see below). |
 
 **Notes**:
 
@@ -172,6 +172,7 @@ Locates a described region inside an image and returns a normalized bounding box
 4. **Long context**: the optional `TypeSafe-Danger-Zone-Long-Context: true` header is **forwarded verbatim** by AxonHub. That switch has no inferable request signal, so the caller decides.
 5. **Every asset must be referenced**: an `assets` entry that no placeholder resolves to is rejected upstream (`Invalid image request`). Note that `instructions` and `criteria` count as reference sites too.
 6. **A single placeholder is capped at 1024 bytes**: longer references are rejected upstream with 413 `Request exceeds size limits`, not 400.
+7. **The `part` (multipart) mode is not supported**: upstream parses the whole body as multipart as soon as it sees a `part` field, and rejects the request with `Invalid image request` even when `data_base64` is also present. AxonHub speaks JSON on both sides, so it rejects any request that sets `part` and explains why. Always inline images as `data_base64`.
 
 ---
 

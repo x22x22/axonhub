@@ -34,8 +34,10 @@ type SystemOneAsset struct {
 	// DataBase64 carries the asset bytes, base64-encoded.
 	DataBase64 string `json:"data_base64,omitempty"`
 
-	// Part names the multipart form part holding the bytes. When set, DataBase64
-	// is ignored.
+	// Part names the multipart form part holding the bytes. It is only valid for
+	// multipart requests, which AxonHub does not send, so the typesafe outbound
+	// transformer rejects any asset that sets it. DataBase64 is the supported
+	// path.
 	Part string `json:"part,omitempty"`
 }
 

@@ -75,24 +75,36 @@ func TestAssetsMultipleImages(t *testing.T) {
 	require.Equal(t, "jpeg", rawAssets["c"].(map[string]any)["format"])
 }
 
-// TestAssetsPartMode 覆盖 multipart 场景的 part 字段透传。
-// AxonHub 目前只发 JSON body，part 无法真正生效，但字段必须原样保留，
-// 以免未来支持 multipart 时出现静默丢字段。
-func TestAssetsPartMode(t *testing.T) {
+// TestAssetsPartModeRejected part 模式要求整个请求体是 multipart，而 AxonHub
+// 的入站与出站都是 JSON，上游只要看到 part 字段就拒（即使同时给了
+// data_base64）。因此出站必须提前给出可读错误，而不是把请求送上去换回一条
+// 不说原因的 "Invalid image request"。
+func TestAssetsPartModeRejected(t *testing.T) {
 	tr := newTestOutbound(t)
 
 	assets := map[string]llm.SystemOneAsset{
 		"img": {Type: "image", Part: "door-photo"},
 	}
-	out, err := tr.TransformRequest(context.Background(),
+	_, err := tr.TransformRequest(context.Background(),
 		systemOneRequestWith(map[string]any{"photo": "img"}, assets))
-	require.NoError(t, err)
 
-	payload := decodeOutboundBody(t, out.Body)
-	one := payload["assets"].(map[string]any)["img"].(map[string]any)
-	require.Equal(t, "door-photo", one["part"])
-	require.NotContains(t, one, "data_base64", "part 模式下不应凭空补出 data_base64")
-	require.NotContains(t, one, "format", "part 模式下 format 可选")
+	require.Error(t, err, "part 模式应被显式拒绝")
+	require.Contains(t, err.Error(), "multipart", "错误信息应说明原因")
+	require.Contains(t, err.Error(), "data_base64", "错误信息应给出替代方案")
+	require.Contains(t, err.Error(), "door-photo", "错误信息应指出是哪个 part")
+}
+
+// TestAssetsPartModeRejectedEvenWithBase64 同时给 part 与 data_base64 也要拒绝：
+// 上游见到 part 就按 multipart 解析，base64 不会被采纳。
+func TestAssetsPartModeRejectedEvenWithBase64(t *testing.T) {
+	tr := newTestOutbound(t)
+
+	assets := map[string]llm.SystemOneAsset{
+		"img": {Type: "image", Format: "png", DataBase64: "QUJD", Part: "some-part"},
+	}
+	_, err := tr.TransformRequest(context.Background(),
+		systemOneRequestWith(map[string]any{"photo": "img"}, assets))
+	require.Error(t, err, "part 存在即应拒绝，不能因为带了 base64 就放行")
 }
 
 // TestAssetsOmittedWhenEmpty assets 为空时不应发出空对象，
