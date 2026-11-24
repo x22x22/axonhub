@@ -24,6 +24,7 @@ Welcome to the AxonHub documentation center! This index will help you quickly fi
 | [Request Tracing](guides/tracing.md) | Complete request traceability |
 | [Request Override](guides/request-override.md) | Dynamically modify request parameters |
 | [Prompt Protection Rules](guides/prompt-protection-rules.md) | Sensitive information filtering and protection |
+| [Decision Models](guides/decision-model.md) | System One structured judgments (Bailian / TypeSafe) |
 | [Antigravity](guides/antigravity.md) | Advanced routing and optimization features |
 
 ### 🤖 AI Coding Tools Integration
