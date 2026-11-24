@@ -75,10 +75,26 @@ func (t *OutboundTransformer) TransformRequest(
 		return nil, fmt.Errorf("model is required")
 	}
 
+	// assets 的 part 模式要求整个请求体是 multipart：上游只要看到 part
+	// 字段就按 multipart 解析，即使同时给了 data_base64 也会以
+	// "Invalid image request" 拒绝。AxonHub 的入站与出站都是 JSON，
+	// part 在此环境下无法工作，因此提前给出可读错误，而不是把请求送给
+	// 上游换回一条不说明原因的消息。
+	for name, asset := range llmReq.SystemOne.Assets {
+		if asset.Part != "" {
+			return nil, fmt.Errorf(
+				"asset %q references multipart part %q, but AxonHub only sends JSON bodies; "+
+					"inline the image bytes as data_base64 instead of using part",
+				name, asset.Part,
+			)
+		}
+	}
+
 	wireReq := systemOneWireRequest{
 		Model:     llmReq.Model,
 		State:     llmReq.SystemOne.State,
 		Questions: llmReq.SystemOne.Questions,
+		Assets:    llmReq.SystemOne.Assets,
 	}
 
 	body, err := json.Marshal(wireReq)
@@ -91,6 +107,7 @@ func (t *OutboundTransformer) TransformRequest(
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Accept", "application/json")
+	applyDangerZoneHeaders(headers, llmReq)
 
 	url := t.buildURL()
 
@@ -106,6 +123,72 @@ func (t *OutboundTransformer) TransformRequest(
 		RequestType: string(llm.RequestTypeSystemOne),
 		APIFormat:   string(llm.APIFormatTypeSafeSystemOne),
 	}, nil
+}
+
+// TypeSafe gates image input (assets and the "box" primitive) and long context
+// behind explicit opt-in headers. Sending a request that uses either feature
+// without the matching header is rejected upstream, so AxonHub turns the header
+// on when the request itself proves it needs it, and otherwise forwards the
+// caller's choice verbatim.
+const (
+	headerDangerZoneImages      = "TypeSafe-Danger-Zone-Images"
+	headerDangerZoneLongContext = "TypeSafe-Danger-Zone-Long-Context"
+)
+
+// applyDangerZoneHeaders enables the TypeSafe opt-in headers the request
+// requires and forwards any the caller set explicitly.
+func applyDangerZoneHeaders(headers http.Header, llmReq *llm.Request) {
+	if headers == nil || llmReq == nil || llmReq.SystemOne == nil {
+		return
+	}
+
+	needsImages := len(llmReq.SystemOne.Assets) > 0
+	if !needsImages {
+		for _, question := range llmReq.SystemOne.Questions {
+			if strings.EqualFold(strings.TrimSpace(question.Type), "box") {
+				needsImages = true
+				break
+			}
+		}
+	}
+	if needsImages {
+		headers.Set(headerDangerZoneImages, "true")
+	}
+
+	// Long context has no request signal AxonHub can infer, so it stays a caller
+	// decision. Forward it rather than dropping it silently.
+	if rawReq := llmReq.RawRequest; rawReq != nil {
+		for _, name := range []string{headerDangerZoneLongContext, headerDangerZoneImages} {
+			if value := lookupHeaderCanonicalInsensitive(rawReq.Headers, name); value != "" {
+				headers.Set(name, value)
+			}
+		}
+	}
+}
+
+// lookupHeaderCanonicalInsensitive reads a header regardless of how the map key
+// is cased. http.Header.Get only matches the canonical form
+// ("Typesafe-Danger-Zone-Images"), so a map populated with the original casing
+// ("TypeSafe-Danger-Zone-Images") would silently read as empty. Real server
+// traffic is canonical, but test fixtures and reverse proxies are not
+// guaranteed to be, and silently dropping the caller's opt-in is worse than
+// scanning the few headers.
+func lookupHeaderCanonicalInsensitive(headers http.Header, name string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	if value := strings.TrimSpace(headers.Get(name)); value != "" {
+		return value
+	}
+	for key, values := range headers {
+		if len(values) == 0 || !strings.EqualFold(key, name) {
+			continue
+		}
+		if value := strings.TrimSpace(values[0]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (t *OutboundTransformer) buildURL() string {
