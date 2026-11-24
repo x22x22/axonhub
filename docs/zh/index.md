@@ -24,6 +24,7 @@
 | [请求追踪](guides/tracing.md) | 完整的请求链路追踪 |
 | [请求覆盖](guides/request-override.md) | 动态修改请求参数 |
 | [提示词保护规则](guides/prompt-protection-rules.md) | 敏感信息过滤和保护 |
+| [决策模型](guides/decision-model.md) | System One 结构化判断（百炼 / TypeSafe） |
 
 ### 🤖 AI 编程工具集成
 
