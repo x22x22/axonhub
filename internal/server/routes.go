@@ -29,6 +29,7 @@ type Handlers struct {
 	System         *api.SystemHandlers
 	Auth           *api.AuthHandlers
 	Jina           *api.JinaHandlers
+	TypeSafe       *api.TypeSafeHandlers
 	Codex          *api.CodexHandlers
 	ClaudeCode     *api.ClaudeCodeHandlers
 	Antigravity    *api.AntigravityHandlers
@@ -179,6 +180,12 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		jinaGroup := apiGroup.Group("/jina/v1")
 		jinaGroup.POST("/embeddings", handlers.Jina.CreateEmbedding)
 		jinaGroup.POST("/rerank", handlers.Jina.Rerank)
+	}
+
+	{
+		// Native System One endpoint, mirroring TypeSafe's own path.
+		typesafeGroup := apiGroup.Group("/typesafe/v1")
+		typesafeGroup.POST("/systemone", handlers.TypeSafe.SystemOne)
 	}
 
 	{

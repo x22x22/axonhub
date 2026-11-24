@@ -9,6 +9,9 @@ const (
 	RequestTypeImage     RequestType = "image"
 	RequestTypeVideo     RequestType = "video"
 	RequestTypeCompact   RequestType = "compact"
+
+	// RequestTypeSystemOne represents a System One decision inference request.
+	RequestTypeSystemOne RequestType = "systemone"
 )
 
 func (r RequestType) String() string {
@@ -30,6 +33,8 @@ const (
 	APIFormatAnthropicMessage      APIFormat = "anthropic/messages"
 	APIFormatAiSDKText             APIFormat = "aisdk/text"
 	APIFormatAiSDKDataStream       APIFormat = "aisdk/datastream"
+
+	APIFormatTypeSafeSystemOne APIFormat = "typesafe/systemone"
 
 	APIFormatGeminiEmbedding APIFormat = "gemini/embeddings"
 

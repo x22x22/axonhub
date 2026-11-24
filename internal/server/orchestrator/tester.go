@@ -12,6 +12,7 @@ import (
 	"github.com/tidwall/gjson"
 	"golang.org/x/sync/errgroup"
 
+	channelent "github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xjson"
@@ -21,7 +22,9 @@ import (
 	"github.com/looplj/axonhub/llm/pipeline"
 	"github.com/looplj/axonhub/llm/pipeline/stream"
 	"github.com/looplj/axonhub/llm/streams"
+	"github.com/looplj/axonhub/llm/transformer"
 	"github.com/looplj/axonhub/llm/transformer/openai"
+	"github.com/looplj/axonhub/llm/transformer/typesafe"
 )
 
 const testChannelAPIKeysMaxConcurrency = 8
@@ -85,7 +88,23 @@ func (processor *TestChannelOrchestrator) TestChannel(
 	modelID *string,
 	proxy *httpclient.ProxyConfig,
 ) (*TestChannelResult, error) {
-	inbound := openai.NewInboundTransformer()
+	channel, err := processor.channelService.GetChannel(ctx, channelID.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// System One channels speak their own request shape, so the test has to build a
+	// System One body and use the matching inbound transformer. Everything else uses
+	// the OpenAI chat surface.
+	systemOne := channel != nil && channel.Type == channelent.TypeTypesafe
+
+	var inbound transformer.Inbound
+	if systemOne {
+		inbound = typesafe.NewSystemOneInboundTransformer()
+	} else {
+		inbound = openai.NewInboundTransformer()
+	}
+
 	// Create ChatCompletionOrchestrator for this test request
 	chatProcessor := &ChatCompletionOrchestrator{
 		channelSelector: NewSpecifiedChannelSelector(processor.channelService, channelID),
@@ -109,11 +128,6 @@ func (processor *TestChannelOrchestrator) TestChannel(
 		modelCircuitBreaker:        processor.modelCircuitBreaker,
 	}
 
-	channel, err := processor.channelService.GetChannel(ctx, channelID.ID)
-	if err != nil {
-		return nil, err
-	}
-
 	testModel := lo.FromPtr(modelID)
 	if testModel == "" {
 		testModel = channel.DefaultTestModel
@@ -123,38 +137,95 @@ func (processor *TestChannelOrchestrator) TestChannel(
 	useStream := channel != nil && channel.Policies.Stream == objects.CapabilityPolicyRequire
 
 	// Create a simple test request
-	llmRequest := &llm.Request{
-		Model: testModel,
-		Messages: []llm.Message{
-			{
-				Role: "system",
-				Content: llm.MessageContent{
-					Content: lo.ToPtr("You are a helpful assistant."),
+	const (
+		testSystemPrompt = "You are a helpful assistant."
+		testUserPrompt   = "Hello world, I'm AxonHub. Please tell me who you are?"
+	)
+
+	var body []byte
+	if systemOne {
+		if useStream {
+			return &TestChannelResult{
+				Success: false,
+				Message: lo.ToPtr("systemone does not support streaming"),
+			}, nil
+		}
+
+		// Prompt protection rules only walk llm.Messages, while a System One request
+		// carries its text in State. Protect a chat-shaped request first, then join the
+		// protected messages into State, mirroring how the real endpoint maps roles.
+		protectReq := &llm.Request{
+			Model: testModel,
+			Messages: []llm.Message{
+				{Role: "system", Content: llm.MessageContent{Content: lo.ToPtr(testSystemPrompt)}},
+				{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr(testUserPrompt)}},
+			},
+		}
+
+		protected, err := processor.promptProtectionRuleService.Protect(ctx, protectReq)
+		if err != nil {
+			return nil, err
+		}
+		if protected == nil {
+			protected = protectReq
+		}
+
+		state := lo.FromPtr(protected.Messages[0].Content.Content) + "\n\n" +
+			lo.FromPtr(protected.Messages[len(protected.Messages)-1].Content.Content)
+
+		body, err = json.Marshal(struct {
+			llm.SystemOneRequest
+
+			Model string `json:"model"`
+		}{
+			Model: testModel,
+			SystemOneRequest: llm.SystemOneRequest{
+				State: state,
+				Questions: map[string]llm.SystemOneQuestion{
+					"connection": {
+						Type:         "noul",
+						Instructions: "Does the state contain a test prompt?",
+					},
 				},
 			},
-			{
-				Role: "user",
-				Content: llm.MessageContent{
-					MultipleContent: []llm.MessageContentPart{
-						{
-							Type: "text",
-							Text: lo.ToPtr("Hello world, I'm AxonHub."),
-						},
-						{
-							Type: "text",
-							Text: lo.ToPtr("Please tell me who you are?"),
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		llmRequest := &llm.Request{
+			Model: testModel,
+			Messages: []llm.Message{
+				{
+					Role: "system",
+					Content: llm.MessageContent{
+						Content: lo.ToPtr(testSystemPrompt),
+					},
+				},
+				{
+					Role: "user",
+					Content: llm.MessageContent{
+						MultipleContent: []llm.MessageContentPart{
+							{
+								Type: "text",
+								Text: lo.ToPtr("Hello world, I'm AxonHub."),
+							},
+							{
+								Type: "text",
+								Text: lo.ToPtr("Please tell me who you are?"),
+							},
 						},
 					},
 				},
 			},
-		},
-		MaxCompletionTokens: lo.ToPtr(int64(256)),
-		Stream:              lo.ToPtr(useStream),
-	}
+			MaxCompletionTokens: lo.ToPtr(int64(256)),
+			Stream:              lo.ToPtr(useStream),
+		}
 
-	body, err := json.Marshal(llmRequest)
-	if err != nil {
-		return nil, err
+		body, err = json.Marshal(llmRequest)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Measure latency

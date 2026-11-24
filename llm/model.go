@@ -224,6 +224,9 @@ type Request struct {
 	// Compact is the compact request, will be set if the request is compact request.
 	Compact *CompactRequest `json:"compact,omitempty"`
 
+	// SystemOne is the System One request, will be set if the request is System One request.
+	SystemOne *SystemOneRequest `json:"systemone,omitempty"`
+
 	// RawRequest is the raw request from the client.
 	RawRequest *httpclient.Request `json:"raw_request,omitempty"`
 
@@ -584,6 +587,9 @@ type Response struct {
 	// Compact is the compact response, will present if the request is compact request.
 	Compact *CompactResponse `json:"compact,omitempty"`
 
+	// SystemOne is the System One response, will present if the request is System One request.
+	SystemOne *SystemOneResponse `json:"systemone,omitempty"`
+
 	// RequestType is the outbound request type from the llm service.
 	// e.g. the request from the chat/completions endpoint is in the chat type.
 	// if it is embedding request, it will be embedding.
@@ -723,6 +729,18 @@ type PromptTokensDetails struct {
 type ResponseError struct {
 	StatusCode int         `json:"-"`
 	Detail     ErrorDetail `json:"error"`
+
+	// Cause keeps the underlying error (for example a transport failure) so callers
+	// can still match it with errors.Is / errors.As after classification.
+	Cause error `json:"-"`
+}
+
+// Unwrap exposes the underlying cause, if any.
+func (e *ResponseError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 func (e ResponseError) Error() string {

@@ -31,6 +31,7 @@ import {
   AiHubMix,
 } from '@lobehub/icons';
 import { NanoGPTIcon } from '../components/nanogpt-icon';
+import { TypeSafeIcon } from '../components/typesafe-icon';
 import { BURNCLOUD_DEFAULT_MODELS } from './burncloud-models';
 import { ApiFormat, ChannelType } from './schema';
 
@@ -39,6 +40,7 @@ export const OPENAI_CHAT_COMPLETIONS: ApiFormat = 'openai/chat_completions';
 export const OPENAI_RESPONSES: ApiFormat = 'openai/responses';
 export const ANTHROPIC_MESSAGES: ApiFormat = 'anthropic/messages';
 export const GEMINI_CONTENTS: ApiFormat = 'gemini/contents';
+export const TYPESAFE_SYSTEMONE: ApiFormat = 'typesafe/systemone';
 
 /**
  * Channel configuration interface
@@ -496,6 +498,14 @@ export const CHANNEL_CONFIGS: Record<ChannelType, ChannelConfig> = {
     apiFormat: OPENAI_CHAT_COMPLETIONS,
     color: 'bg-purple-100 text-purple-800 border-purple-200',
     icon: Jina,
+  },
+  typesafe: {
+    channelType: 'typesafe',
+    baseURL: 'https://api.typesafe.ai/v1',
+    defaultModels: ['jev-latest', 'jev-preview', 'jev-1.13.0'],
+    apiFormat: TYPESAFE_SYSTEMONE,
+    color: 'bg-blue-100 text-blue-800 border-blue-200',
+    icon: TypeSafeIcon,
   },
   github: {
     channelType: 'github',
