@@ -3,8 +3,6 @@ package typesafe
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -24,22 +22,15 @@ import (
 // 响应中的数值取自官方文档公布的 jev-1.14.0 录制结果，因此既验证解析，也
 // 顺带守住"这些字段名确实是上游真实使用的字段名"。
 
-// probabilityOf 取出 probabilities 里某个键的概率值。
+// probabilityOf 取出某个答案里指定键的概率值，断言必须存在。
 //
-// SystemOneAnswer.UnmarshalJSON 用 UseNumber() 解析，所以嵌套对象里的数值是
-// json.Number 而不是 float64——这是刻意的：概率不经过 float64 往返可以避免
-// 精度损失。测试里断言数值前必须先按真实类型取。
-func probabilityOf(t *testing.T, probabilities any, key string) float64 {
+// 概率由 SystemOneAnswer.Probability 统一取值：内部按 json.Number 解析，
+// 因此上游 17 位精度不会在这里被 float64 提前丢掉。
+func probabilityOf(t *testing.T, ans llm.SystemOneAnswer, key string) float64 {
 	t.Helper()
 
-	probs, ok := probabilities.(map[string]any)
-	require.True(t, ok, "probabilities 必须是对象，实际 %T", probabilities)
-
-	raw, ok := probs[key]
-	require.True(t, ok, "%q 必须在 probabilities 里，实际键：%v", key, probs)
-
-	f, err := strconv.ParseFloat(fmt.Sprint(raw), 64)
-	require.NoError(t, err, "概率必须是可解析的数值，实际 %T = %v", raw, raw)
+	f, ok := ans.Probability(key)
+	require.True(t, ok, "%q 必须存在于 probabilities 中，实际 %v", key, ans.Probabilities)
 
 	return f
 }
@@ -170,7 +161,7 @@ func TestPatternCompanionNoulGuardsChoice(t *testing.T) {
 			aboutOurs := *a["about_our_product"].Noul
 
 			// 记录下游真正会读的两个量：Noul 值和"被选中项"的概率。
-			chosenProb := probabilityOf(t, product.Probabilities, product.Choice)
+			chosenProb := probabilityOf(t, product, product.Choice)
 
 			ignored := aboutOurs < noBelow
 			require.Equal(t, tc.wantIgnoreChoice, ignored,
@@ -311,7 +302,7 @@ func TestPatternRoutingByProbability(t *testing.T) {
 	intent := resp.SystemOne.Answers["intent"]
 	require.Equal(t, "approve_transfer", intent.Choice)
 
-	likelihood := probabilityOf(t, intent.Probabilities, "approve_transfer")
+	likelihood := probabilityOf(t, intent, "approve_transfer")
 	require.InDelta(t, 0.95, likelihood, 1e-9)
 
 	// 低风险动作 0.7 即可；高风险动作要 0.9 以上才进入确认流程。
@@ -323,7 +314,7 @@ func TestPatternRoutingByProbability(t *testing.T) {
 
 	// 关键：confidence 对 Choice 只是 top probability 的变换，阈值应放在概率上。
 	// 0.03/0.02 这种"其他选项也很低"的形状不能替代对目标选项概率的检查。
-	require.Less(t, probabilityOf(t, intent.Probabilities, "check_balance"), 0.5)
+	require.Less(t, probabilityOf(t, intent, "check_balance"), 0.5)
 }
 
 // TestPatternCompositeScoring 复刻 Composite scoring：
@@ -473,7 +464,7 @@ func TestPatternChoiceConfidenceOnlyTopProbability(t *testing.T) {
 			require.NotNil(t, ans.Confidence)
 			confidences = append(confidences, *ans.Confidence)
 
-			require.InDelta(t, 0.6, probabilityOf(t, ans.Probabilities, "a"), 1e-9)
+			require.InDelta(t, 0.6, probabilityOf(t, ans, "a"), 1e-9)
 		})
 	}
 
@@ -529,7 +520,7 @@ func TestPatternScoreBorderSumBeatsConfidence(t *testing.T) {
 	sev := resp.SystemOne.Answers["severity"]
 	require.InDelta(t, 0.35, *sev.Confidence, 0.01)
 
-	high := probabilityOf(t, sev.Probabilities, "2")
+	high := probabilityOf(t, sev, "2")
 
 	// 44% 的概率落在最高等级，但 confidence 只有 0.35 —— 正是因为这个分摊
 	// 发生在相邻等级。如果决策关心"是否达到 high"，必须直接读 0.43。

@@ -77,7 +77,8 @@ func TestConfidenceChoiceFormulaMatchesProbabilities(t *testing.T) {
 			sum := 0.0
 			maxProb := 0.0
 			for key := range ans.Probabilities.(map[string]any) {
-				p := probabilityOf(t, ans.Probabilities, key)
+				p, ok := ans.Probability(key)
+				require.True(t, ok, "缺少键 %s", key)
 				sum += p
 				if p > maxProb {
 					maxProb = p
@@ -151,7 +152,9 @@ func TestConfidenceScoreFormulaMatchesProbabilities(t *testing.T) {
 			probs := make([]float64, n)
 			sum := 0.0
 			for i := 0; i < n; i++ {
-				probs[i] = probabilityOf(t, ans.Probabilities, itoa(i))
+				p, ok := ans.Probability(itoa(i))
+				require.True(t, ok, "缺少等级 %d", i)
+				probs[i] = p
 				sum += probs[i]
 			}
 			require.InDelta(t, 1.0, sum, 1e-6, "概率之和应为 1")
@@ -277,10 +280,13 @@ func TestKnownFailureModeMarksJaggedness(t *testing.T) {
 	// 断言解析出的值仍在合法域内（这是 AxonHub 的职责边界）。
 	require.GreaterOrEqual(t, *a["total_is_under_five"].Noul, 0.0)
 	require.LessOrEqual(t, *a["total_is_under_five"].Noul, 1.0)
-	require.InDelta(t, 1.0, probabilityOf(t, a["item_count"].Probabilities, "more")+
-		probabilityOf(t, a["item_count"].Probabilities, "three")+
-		probabilityOf(t, a["item_count"].Probabilities, "two")+
-		probabilityOf(t, a["item_count"].Probabilities, "one"), 1e-6)
+	sum := 0.0
+	for _, level := range []string{"one", "two", "three", "more"} {
+		p, ok := a["item_count"].Probability(level)
+		require.True(t, ok, "缺少键 %s", level)
+		sum += p
+	}
+	require.InDelta(t, 1.0, sum, 1e-6)
 }
 
 // TestDistributionShapeDiagnostics 覆盖文档 "Diagnosing low confidence" 那张表：
@@ -331,7 +337,8 @@ func TestDistributionShapeDiagnostics(t *testing.T) {
 			// 取前两名，按官方诊断表的判据。
 			var p1, p2 float64
 			for key := range probs {
-				p := probabilityOf(t, ans.Probabilities, key)
+				p, ok := ans.Probability(key)
+				require.True(t, ok, "缺少键 %s", key)
 				switch {
 				case p > p1:
 					p2 = p1

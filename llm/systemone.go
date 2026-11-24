@@ -162,6 +162,63 @@ func (a *SystemOneAnswer) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Probability returns the probability recorded for one option (Choice) or level
+// (Score).
+//
+// Probabilities arrive as json.Number rather than float64: the decoder above
+// runs UseNumber so the values keep the precision the upstream sent. Converting
+// through float64 would round 0.33333333333333337 to 0.3333333333333333 and can
+// make a distribution stop summing to 1 after a trip through Go. That choice is
+// deliberate, but it puts a type switch in front of every caller that only wants
+// a number, so this method does it once, in one place.
+//
+// ok is false when the answer has no probabilities, or has no entry for key.
+func (a SystemOneAnswer) Probability(key string) (float64, bool) {
+	probs, ok := a.Probabilities.(map[string]any)
+	if !ok {
+		return 0, false
+	}
+
+	raw, ok := probs[key]
+	if !ok {
+		return 0, false
+	}
+
+	switch v := raw.(type) {
+	case json.Number:
+		f, err := v.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	case float64:
+		// Already a float when the answer was built in Go rather than decoded.
+		return v, true
+	default:
+		return 0, false
+	}
+}
+
+// LegendLevels returns the Score legend keyed by level, when the legend is the
+// string-keyed object the upstream sends.
+func (a SystemOneAnswer) LegendLevels() (map[string]string, bool) {
+	raw, ok := a.Legend.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+
+	levels := make(map[string]string, len(raw))
+	for k, v := range raw {
+		text, ok := v.(string)
+		if !ok {
+			return nil, false
+		}
+		levels[k] = text
+	}
+
+	return levels, true
+}
+
 func (a SystemOneAnswer) MarshalJSON() ([]byte, error) {
 	type Alias SystemOneAnswer
 	base, err := json.Marshal(Alias(a))
