@@ -646,6 +646,7 @@ export type Provider =
   | 'antigravity'
   | 'nanogpt'
   | 'fireworks'
+  | 'typesafe'
   | 'ollama';
 
 /**
@@ -700,12 +701,16 @@ export const CHANNEL_TYPE_TO_PROVIDER: Record<ChannelType, Provider> = {
   nanogpt: 'nanogpt',
   nanogpt_responses: 'nanogpt',
   fireworks: 'fireworks',
+  typesafe: 'typesafe',
   ollama: 'ollama',
 };
 
 /**
  * Get provider for a channel type
+ *
+ * Falls back to 'openai' when the mapping is missing so a newly added channel
+ * type never renders the literal `channels.providers.undefined` string.
  */
 export const getProvider = (channelType: ChannelType): Provider => {
-  return CHANNEL_TYPE_TO_PROVIDER[channelType];
+  return CHANNEL_TYPE_TO_PROVIDER[channelType] ?? 'openai';
 };
