@@ -96,7 +96,8 @@ func (processor *TestChannelOrchestrator) TestChannel(
 	// System One channels speak their own request shape, so the test has to build a
 	// System One body and use the matching inbound transformer. Everything else uses
 	// the OpenAI chat surface.
-	systemOne := channel != nil && channel.Type == channelent.TypeTypesafe
+	systemOne := channel != nil &&
+		(channel.Type == channelent.TypeTypesafe || channel.Type == channelent.TypeBailianSystemone)
 
 	var inbound transformer.Inbound
 	if systemOne {

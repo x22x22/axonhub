@@ -86,6 +86,7 @@ func (Channel) Fields() []ent.Field {
 				"nanogpt_responses",
 				"ollama",
 				"typesafe",
+				"bailian_systemone",
 			).
 			Annotations(
 				entgql.OrderField("TYPE"),
