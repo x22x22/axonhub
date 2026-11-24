@@ -778,8 +778,11 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 		}
 
 		return ch, nil
-	case channel.TypeTypesafe:
-		// System One: the outbound transformer talks to TypeSafe's /v1/systemone.
+	case channel.TypeTypesafe, channel.TypeBailianSystemone:
+		// System One: the outbound transformer talks to the provider's
+		// /compatible-mode/v1/systemone (Bailian) or /v1/systemone (TypeSafe)
+		// endpoint. Both speak the same request shape, so they share the
+		// transformer and differ only in base URL.
 		transformer, err := typesafe.NewOutboundTransformerWithConfig(&typesafe.Config{
 			BaseURL:        c.BaseURL,
 			APIKeyProvider: getAPIKeyProvider(ch),

@@ -41,6 +41,7 @@ export const OPENAI_RESPONSES: ApiFormat = 'openai/responses';
 export const ANTHROPIC_MESSAGES: ApiFormat = 'anthropic/messages';
 export const GEMINI_CONTENTS: ApiFormat = 'gemini/contents';
 export const TYPESAFE_SYSTEMONE: ApiFormat = 'typesafe/systemone';
+export const BAILIAN_SYSTEMONE: ApiFormat = 'bailian/systemone';
 
 /**
  * Channel configuration interface
@@ -507,6 +508,19 @@ export const CHANNEL_CONFIGS: Record<ChannelType, ChannelConfig> = {
     color: 'bg-blue-100 text-blue-800 border-blue-200',
     icon: TypeSafeIcon,
   },
+  bailian_systemone: {
+    channelType: 'bailian_systemone',
+    // Bailian's decision model is served from a workspace-scoped domain, not the
+    // shared dashscope host: POSTing /systemone there returns 404. The literal
+    // {WorkspaceId} stays in the default on purpose so the value has to be
+    // replaced before the channel can work.
+    baseURL:
+      'https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    defaultModels: ['decision-model-preview'],
+    apiFormat: BAILIAN_SYSTEMONE,
+    color: 'bg-blue-100 text-blue-800 border-blue-200',
+    icon: Bailian,
+  },
   github: {
     channelType: 'github',
     baseURL: 'https://models.github.ai/inference',
@@ -690,6 +704,7 @@ export const CHANNEL_TYPE_TO_PROVIDER: Record<ChannelType, Provider> = {
   modelscope: 'modelscope',
   bailian: 'bailian',
   bailian_anthropic: 'bailian',
+  bailian_systemone: 'bailian',
   moonshot_coding: 'moonshot',
   jina: 'jina',
   github: 'github',
@@ -708,9 +723,17 @@ export const CHANNEL_TYPE_TO_PROVIDER: Record<ChannelType, Provider> = {
 /**
  * Get provider for a channel type
  *
- * Falls back to 'openai' when the mapping is missing so a newly added channel
- * type never renders the literal `channels.providers.undefined` string.
+ * `CHANNEL_TYPE_TO_PROVIDER` is typed as `Record<ChannelType, Provider>`, so a
+ * missing entry is a type error. The runtime guard below only exists for
+ * untyped call paths (e.g. values coming from the API): it degrades to the
+ * channel type itself rather than mislabelling the channel as another provider.
  */
 export const getProvider = (channelType: ChannelType): Provider => {
-  return CHANNEL_TYPE_TO_PROVIDER[channelType] ?? 'openai';
+  const provider = CHANNEL_TYPE_TO_PROVIDER[channelType];
+
+  if (!provider) {
+    return channelType as Provider;
+  }
+
+  return provider;
 };

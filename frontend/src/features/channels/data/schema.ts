@@ -15,6 +15,7 @@ export const apiFormatSchema = z.enum([
   'jina/rerank',
   'jina/embeddings',
   'typesafe/systemone',
+  'bailian/systemone',
   'ollama/chat',
 ]);
 
@@ -63,6 +64,7 @@ export const channelTypeSchema = z.enum([
   'moonshot_coding',
   'jina',
   'typesafe',
+  'bailian_systemone',
   'github',
   'github_copilot',
   'claudecode',
