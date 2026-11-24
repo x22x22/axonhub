@@ -295,6 +295,7 @@
   "channels.dialogs.fields.provider.label": "Provider",
   "channels.dialogs.fields.baseURL.label": "Base URL",
   "channels.dialogs.fields.baseURL.placeholder": "https://api.openai.com/v1",
+  "channels.dialogs.fields.baseURL.systemOneHint": "System One is a provider-neutral format: set Base URL to any endpoint that serves /systemone, such as a Bailian workspace domain, a self-hosted vLLM deployment, or another vendor's compatible service. Bailian's own decision model requires its workspace-scoped domain; the shared host returns 404.",
   "channels.dialogs.fields.streamPolicy.label": "Stream Policy",
   "channels.dialogs.fields.streamPolicy.placeholder": "Select policy",
   "channels.dialogs.fields.streamPolicy.options.unlimited": "Unlimited (follow request)",

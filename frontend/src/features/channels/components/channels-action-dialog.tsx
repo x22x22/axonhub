@@ -44,6 +44,7 @@ import {
   OPENAI_RESPONSES,
   ANTHROPIC_MESSAGES,
   GEMINI_CONTENTS,
+  BAILIAN_SYSTEMONE,
 } from '../data/config_channels';
 import {
   PROVIDER_CONFIGS,
@@ -1899,6 +1900,11 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                 }
                                 {...field}
                               />
+                              {selectedApiFormat === BAILIAN_SYSTEMONE && (
+                                <p className='text-muted-foreground mt-1 text-xs'>
+                                  {t('channels.dialogs.fields.baseURL.systemOneHint')}
+                                </p>
+                              )}
                               <FormMessage />
                             </div>
                           </FormItem>

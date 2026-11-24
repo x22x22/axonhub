@@ -292,6 +292,7 @@
   "channels.dialogs.fields.provider.label": "服务商",
   "channels.dialogs.fields.baseURL.label": "Base URL",
   "channels.dialogs.fields.baseURL.placeholder": "https://api.openai.com/v1",
+  "channels.dialogs.fields.baseURL.systemOneHint": "System One 是通用协议格式：Base URL 可指向任意兼容 /systemone 的端点，例如百炼的业务空间域名、私有部署的 vLLM，或其他厂商的兼容服务。使用百炼决策模型时请填写其业务空间专属域名，共享域名会返回 404。",
   "channels.dialogs.fields.streamPolicy.label": "流式策略",
   "channels.dialogs.fields.streamPolicy.placeholder": "选择策略",
   "channels.dialogs.fields.streamPolicy.options.unlimited": "没有限制 (遵循请求)",
