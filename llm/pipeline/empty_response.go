@@ -73,6 +73,10 @@ func hasResponseContent(resp *llm.Response) bool {
 		return true
 	}
 
+	if resp.SystemOne != nil && len(resp.SystemOne.Answers) > 0 {
+		return true
+	}
+
 	for _, choice := range resp.Choices {
 		if hasMessageContent(choice.Delta) || hasMessageContent(choice.Message) {
 			return true

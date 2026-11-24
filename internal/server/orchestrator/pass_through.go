@@ -103,7 +103,8 @@ func passThroughBodyNeedsModelPatch(apiFormat llm.APIFormat) bool {
 		llm.APIFormatOpenAIEmbedding,
 		llm.APIFormatJinaEmbedding,
 		llm.APIFormatJinaRerank,
-		llm.APIFormatAnthropicMessage:
+		llm.APIFormatAnthropicMessage,
+		llm.APIFormatTypeSafeSystemOne:
 		return true
 	default:
 		return false

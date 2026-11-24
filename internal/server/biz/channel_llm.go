@@ -36,6 +36,7 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 	"github.com/looplj/axonhub/llm/transformer/openai/copilot"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
+	"github.com/looplj/axonhub/llm/transformer/typesafe"
 	"github.com/looplj/axonhub/llm/transformer/openrouter"
 	"github.com/looplj/axonhub/llm/transformer/xai"
 	"github.com/looplj/axonhub/llm/transformer/zai"
@@ -775,6 +776,19 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 		if tokens != nil {
 			setupAutoRefresh(ch, tokens, oauth.AutoRefreshOptions{})
 		}
+
+		return ch, nil
+	case channel.TypeTypesafe:
+		// System One: the outbound transformer talks to TypeSafe's /v1/systemone.
+		transformer, err := typesafe.NewOutboundTransformerWithConfig(&typesafe.Config{
+			BaseURL:        c.BaseURL,
+			APIKeyProvider: getAPIKeyProvider(ch),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create outbound transformer: %w", err)
+		}
+
+		ch.Outbound = transformer
 
 		return ch, nil
 	case channel.TypeOllama:
