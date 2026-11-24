@@ -24,6 +24,12 @@ const API_FORMAT_PATHS: Record<ApiFormat, string> = {
   'aisdk/datastream': '/api/datastream',
   'jina/rerank': '/v1/rerank',
   'jina/embeddings': '/jina/v1/embeddings',
+  // Both System One providers are served by the same AxonHub route; only the
+  // upstream base URL differs (TypeSafe's /v1 vs Bailian's compatible-mode/v1).
+  'typesafe/systemone': '/typesafe/v1/systemone',
+  'bailian/systemone': '/typesafe/v1/systemone',
+  // Ollama speaks the OpenAI chat surface on AxonHub, so it shares that path.
+  'ollama/chat': '/v1/chat/completions',
 };
 
 function getApiPath(apiFormat?: ApiFormat, body?: any, channelType?: ChannelType): string {

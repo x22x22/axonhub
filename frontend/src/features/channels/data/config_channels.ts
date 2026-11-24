@@ -510,12 +510,13 @@ export const CHANNEL_CONFIGS: Record<ChannelType, ChannelConfig> = {
   },
   bailian_systemone: {
     channelType: 'bailian_systemone',
-    // Bailian's decision model is served from a workspace-scoped domain, not the
-    // shared dashscope host: POSTing /systemone there returns 404. The literal
-    // {WorkspaceId} stays in the default on purpose so the value has to be
-    // replaced before the channel can work.
-    baseURL:
-      'https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    // The System One wire format is provider-neutral, so this channel type is not
+    // tied to Alibaba: point baseURL at any endpoint that speaks /systemone
+    // (Bailian's workspace domain, a self-hosted vLLM deployment, or another
+    // vendor's compatible service). The default is Bailian's shared host as a
+    // sensible starting point; Bailian's own decision model additionally requires
+    // its workspace-scoped domain, which returns 404 on the shared host.
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     defaultModels: ['decision-model-preview'],
     apiFormat: BAILIAN_SYSTEMONE,
     color: 'bg-blue-100 text-blue-800 border-blue-200',
