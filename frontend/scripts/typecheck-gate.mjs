@@ -27,11 +27,44 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE = join(ROOT, 'typecheck-baseline.txt');
 
 /** Collapse `file(line,col): error TSxxxx: msg` into a position-free key. */
+/**
+ * Collapse `file(line,col): error TSxxxx: msg` into a key that is stable
+ * across machines.
+ *
+ * Positions are stripped because line numbers shift whenever unrelated lines
+ * move. Absolute paths are stripped for the same reason: some diagnostics
+ * quote the resolved module path (TS2719, TS2307), which reads
+ * `/Users/me/work/.../node_modules/...` locally but
+ * `/home/runner/work/.../node_modules/...` in CI. Without this the baseline
+ * recorded on one machine reports phantom regressions on the other.
+ */
 function normalize(line) {
   return line
     .trim()
     .replace(/\(\d+,\d+\)/, '')
+    .replace(/"[^"]*?\/node_modules\//g, '"node_modules/')
+    .replace(/\/[^"'\s]*?\/frontend\//g, '')
     .replace(/\s+/g, ' ');
+}
+
+/**
+ * Diagnostics that cannot be compared across machines.
+ *
+ * TS2719 ("Two different types with this name exist, but they are unrelated")
+ * means pnpm resolved two copies of a package. tsc truncates its printed type
+ * with a literal `...`, and the truncation offset depends on the length of the
+ * absolute paths embedded in the message — so the same unresolved duplicate
+ * prints `channelTagsMatchMode:...` on a developer machine with a deep
+ * worktree path and `channelTagsMatc...` in CI. Normalization runs after tsc
+ * has already truncated, so the keys can never match.
+ *
+ * These are dependency-graph artifacts rather than code defects, and they are
+ * already reported by the package manager, so they are excluded from the gate.
+ */
+const UNSTABLE_CODES = [/error TS2719\b/];
+
+function isComparable(message) {
+  return !UNSTABLE_CODES.some((pattern) => pattern.test(message));
 }
 
 function runTypecheck() {
@@ -49,6 +82,7 @@ function runTypecheck() {
     return output
       .split('\n')
       .filter((line) => line.includes('error TS') && line.startsWith('src/'))
+      .filter((line) => isComparable(line))
       .map(normalize);
   }
 }
