@@ -1,0 +1,60 @@
+name: Typecheck
+
+# The frontend build runs vite, which strips types through esbuild without
+# checking them, so a type error never fails `pnpm build`. This workflow is the
+# gate that actually type-checks the app.
+#
+# It runs on the maintenance branches too: the original gap was that build.yml
+# and test.yml only trigger on unstable, development and release/**, so nothing
+# type-checked a fix landing on 0.9.44-fix.
+
+on:
+  push:
+    branches:
+      - unstable
+      - development
+      - 'release/**'
+      - '0.*'
+  pull_request:
+    branches:
+      - unstable
+      - development
+      - 'release/**'
+      - '0.*'
+
+concurrency:
+  group: typecheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: Typecheck frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      # Compares against typecheck-baseline.txt and fails only when the number
+      # of distinct type errors grows. The baseline exists because the codebase
+      # already carries pre-existing errors; gating on the absolute count would
+      # fail every pull request and the check would be ignored.
+      - name: Typecheck
+        working-directory: frontend
+        run: pnpm typecheck:ci
