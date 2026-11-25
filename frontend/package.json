@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc -b --noEmit",
+    "typecheck:ci": "node scripts/typecheck-gate.mjs",
+    "typecheck:baseline": "node scripts/typecheck-gate.mjs --update",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "preview": "vite preview",
