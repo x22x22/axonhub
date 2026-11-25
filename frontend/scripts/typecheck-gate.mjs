@@ -27,10 +27,23 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE = join(ROOT, 'typecheck-baseline.txt');
 
 /** Collapse `file(line,col): error TSxxxx: msg` into a position-free key. */
+/**
+ * Collapse `file(line,col): error TSxxxx: msg` into a key that is stable
+ * across machines.
+ *
+ * Positions are stripped because line numbers shift whenever unrelated lines
+ * move. Absolute paths are stripped for the same reason: some diagnostics
+ * quote the resolved module path (TS2719, TS2307), which reads
+ * `/Users/me/work/.../node_modules/...` locally but
+ * `/home/runner/work/.../node_modules/...` in CI. Without this the baseline
+ * recorded on one machine reports phantom regressions on the other.
+ */
 function normalize(line) {
   return line
     .trim()
     .replace(/\(\d+,\d+\)/, '')
+    .replace(/"[^"]*?\/node_modules\//g, '"node_modules/')
+    .replace(/\/[^"'\s]*?\/frontend\//g, '')
     .replace(/\s+/g, ' ');
 }
 
